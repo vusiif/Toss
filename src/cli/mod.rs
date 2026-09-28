@@ -191,11 +191,12 @@ pub fn usage() -> String {
 #[cfg(test)]
 mod tests {
     use std::ffi::OsString;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     use super::{Command, Verb, parse, usage};
     use crate::core::error::TossError;
     use crate::core::exit_code::ExitCode;
+    use crate::core::input::resolve;
 
     fn parse_args(list: &[&str]) -> Result<Command, TossError> {
         parse(list.iter().map(OsString::from))
@@ -308,5 +309,42 @@ mod tests {
         }
         assert!(text.contains("-h, --help"));
         assert!(text.contains("toss <path>"));
+    }
+
+    /// Build an argument that starts with `-` but is not valid UTF-8.
+    ///
+    /// Each platform needs its own constructor, so the `cfg` sits here in
+    /// test code: everything under test stays portable, and a binary-only
+    /// crate cannot be reached from an integration test, so this is the only
+    /// door the check fits through (§12, §22).
+    #[cfg(unix)]
+    fn dash_but_not_utf8() -> OsString {
+        use std::os::unix::ffi::OsStringExt;
+        OsString::from_vec(vec![b'-', 0xff])
+    }
+
+    #[cfg(windows)]
+    fn dash_but_not_utf8() -> OsString {
+        use std::os::windows::ffi::OsStringExt;
+        OsString::from_wide(&[0x2d, 0xd800])
+    }
+
+    #[test]
+    fn a_path_that_is_not_valid_utf8_is_never_read_as_an_option() {
+        let arg = dash_but_not_utf8();
+        assert!(
+            arg.to_str().is_none(),
+            "the fixture must not be valid UTF-8"
+        );
+
+        let command = parse([arg.clone()]).expect("a non-UTF-8 argument is still a command");
+        let paths = match command {
+            Command::Automatic { paths } => paths,
+            other => panic!("expected automatic mode, got {other:?}"),
+        };
+        assert_eq!(paths, vec![PathBuf::from(&arg)]);
+
+        let err = resolve(Path::new(&arg)).expect_err("this path does not exist");
+        assert_eq!(err.exit_code(), ExitCode::NotFound);
     }
 }
