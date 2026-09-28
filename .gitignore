@@ -1,8 +1,10 @@
 # Build artifacts
 /target
 
-# Documentation — not committed to version control
+# Documentation — only README.md is version-controlled.
+# Everything else (*.md notes, docs/, doc/) is excluded from commits.
 *.md
+!README.md
 docs/
 doc/
 
