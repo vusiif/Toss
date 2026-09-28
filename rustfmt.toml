@@ -1,0 +1,2 @@
+# Line endings are normalized by .gitattributes; rustfmt detects per file.
+newline_style = "Unix"

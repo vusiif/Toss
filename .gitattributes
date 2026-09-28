@@ -1,0 +1,13 @@
+# Normalize line endings. Source is always checked in as LF so that
+# `cargo fmt --check` behaves identically on Windows and Linux CI.
+* text=auto eol=lf
+
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.pdf  binary
+*.zip  binary
+*.7z   binary
+*.rar  binary

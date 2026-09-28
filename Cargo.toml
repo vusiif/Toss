@@ -2,5 +2,38 @@
 name = "toss"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
+description = "Single-binary emergency file utility: drop a file on it, Toss does the safest useful thing."
+repository = "https://github.com/vusiif/Toss"
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+keywords = ["cli", "file", "archive", "viewer", "emergency"]
+categories = ["command-line-utilities"]
+
+[features]
+default = []
+
+archive = []
+image = []
+media = []
+inspect = []
+hash = []
+
+native = []
+portable = []
+
+full = [
+    "archive",
+    "image",
+    "media",
+    "inspect",
+    "hash",
+]
 
 [dependencies]
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "warn"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "warn"
