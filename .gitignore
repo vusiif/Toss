@@ -11,6 +11,11 @@
 docs/
 doc/
 
+# Vendored third-party source is committed verbatim (§25), including its own
+# doc/ and *.md files — those belong to upstream, not to this project, and a
+# release whose source is half-ignored is not reproducible.
+!third_party/**
+
 # RustRover / IntelliJ volatile state
 # (.idea/.gitignore already covers shelf/, workspace.xml, httpRequests/, queries/,
 #  dataSources/; these are belt-and-braces for anything that leaks past it.)

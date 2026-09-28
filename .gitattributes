@@ -2,6 +2,11 @@
 # `cargo fmt --check` behaves identically on Windows and Linux CI.
 * text=auto eol=lf
 
+# ...except vendored third-party source, which must reach the index exactly
+# as upstream shipped it. Rewriting its line endings would make "committed
+# verbatim" false and make diffing against upstream pointless (§25).
+third_party/** -text
+
 *.png  binary
 *.jpg  binary
 *.jpeg binary
