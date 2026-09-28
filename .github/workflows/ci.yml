@@ -1,0 +1,94 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # The Linux leg is not redundancy: if core ever reaches for a
+        # platform-exclusive API, this is the leg that refuses to compile (§10).
+        os: [ubuntu-latest, windows-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        shell: bash
+        run: |
+          rustup set profile minimal
+          rustup update --no-self-update stable
+          rustup default stable
+          rustup component add --toolchain stable rustfmt clippy
+
+      - name: Formatting
+        shell: bash
+        run: cargo fmt --check
+
+      - name: Clippy
+        shell: bash
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+      - name: Tests
+        shell: bash
+        run: cargo test --locked --all-features
+
+      - name: Release build
+        shell: bash
+        run: cargo build --release --locked --all-features
+
+      - name: Locate binary
+        id: binary
+        shell: bash
+        run: |
+          if [ -f target/release/toss.exe ]; then
+            echo "path=target/release/toss.exe" >> "$GITHUB_OUTPUT"
+          else
+            echo "path=target/release/toss" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Smoke test
+        shell: bash
+        run: |
+          bin="${{ steps.binary.outputs.path }}"
+
+          # No arguments must be an error, not silence (§24), and diagnostics
+          # belong on stderr so stdout stays machine-readable (§25).
+          set +e
+          message=$("$bin" 2>&1 >/dev/null)
+          status=$?
+          set -e
+
+          echo "exit:  $status"
+          echo "stderr: $message"
+
+          if [ "$status" -ne 2 ]; then
+            echo "::error::expected exit 2 (invalid arguments), got $status"
+            exit 1
+          fi
+          if [[ "$message" != Error:\ * ]]; then
+            echo "::error::expected 'Error: ...' on stderr, got: $message"
+            exit 1
+          fi
+
+      - name: Record binary size
+        shell: bash
+        run: |
+          bin="${{ steps.binary.outputs.path }}"
+          size=$(wc -c < "$bin")
+          echo "$bin: $size bytes"
+          {
+            echo "### Binary size — ${{ matrix.os }}"
+            echo
+            echo "$bin: **$size bytes**"
+          } >> "$GITHUB_STEP_SUMMARY"
