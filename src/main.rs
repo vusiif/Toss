@@ -6,7 +6,7 @@
 mod backend;
 mod cli;
 mod core;
-mod detect;
+mod detection;
 mod dispatch;
 mod handlers;
 mod platform;
