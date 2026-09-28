@@ -66,6 +66,16 @@ unsafe extern "C" {
     pub fn archive_read_support_format_all(archive: *mut Archive) -> c_int;
     pub fn archive_read_support_filter_all(archive: *mut Archive) -> c_int;
 
+    /// Register exactly the readers v0.1's milestone calls for (§18.1), rather
+    /// than `support_format_all`, which would also link every other format
+    /// libarchive happens to know and charge its size to Toss (§3, §37).
+    pub fn archive_read_support_format_zip(archive: *mut Archive) -> c_int;
+    pub fn archive_read_support_format_7zip(archive: *mut Archive) -> c_int;
+    /// RAR 4.x.
+    pub fn archive_read_support_format_rar(archive: *mut Archive) -> c_int;
+    /// RAR 5.x — a separate reader from the above, so both must be named.
+    pub fn archive_read_support_format_rar5(archive: *mut Archive) -> c_int;
+
     /// Open a file by path. `block_size` of 0 lets libarchive choose.
     ///
     /// `filename` must remain valid for the duration of the call only;

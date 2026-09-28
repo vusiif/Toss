@@ -2349,3 +2349,136 @@ This allows the archive subsystem to begin small with libarchive, expand natural
 
 That flexibility must be preserved from Phase 4 onward without prematurely implementing features that Toss does not yet need.
 ````
+
+---
+
+# 54. Dependency Decision Record (Phase 4)
+
+> Status: **Decided**
+>
+> Basis: measurement, not expectation. Every number below came from a
+> `cargo build --release --features archive` on the primary development
+> target, with the binaries inspected afterwards.
+
+## 54.1 What was decided
+
+```text
+third_party/libarchive   3.8.9    BSD-3-Clause
+third_party/zlib         1.3.1    zlib license
+third_party/xz (liblzma) 5.6.4    0BSD (liblzma)
+
+All three vendored verbatim, built and linked statically by build.rs,
+enabled only for what the current milestone needs (§3, §37).
+```
+
+zlib and liblzma are not optional extras: without them libarchive compiles
+but refuses to inflate, so ZIP Deflate entries and 7z LZMA entries cannot be
+read at all. RAR/RAR5 needs neither.
+
+## 54.2 The measurement ladder
+
+Two passes were taken. The first registered every format libarchive knows
+(`support_format_all`) and therefore overstated the cost; the second
+registered only the four readers v0.1's milestone names (§18.1) and is the
+figure that counts.
+
+**Corrected — four readers only:**
+
+| Stage | Configuration | `toss.exe` | Δ |
+|---|---|---|---|
+| baseline | no archive feature | 168,448 | — |
+| A′ | libarchive + ZIP/7z/RAR/RAR5 readers, no codecs | 407,552 | +239,104 |
+| B′ | + zlib 1.3.1 (Deflate) | 430,592 | **+23,040** |
+| C′ | + liblzma 5.6.4 (LZMA/LZMA2) | **502,272** | **+71,680** |
+
+**First pass — `support_format_all`, kept for comparison:**
+
+| Stage | `toss.exe` | Δ |
+|---|---|---|
+| A | 558,080 | +389,632 |
+| B | 586,240 | +28,160 |
+| C | 660,480 | +74,240 |
+
+Registering four readers instead of all of them saves **150,528 bytes** at
+stage A and **158,208 bytes** at stage C. That gap is the measurable price
+of enabling formats because they happen to exist (§3).
+
+Total cost of the archive subsystem once wired up: **168,448 → 502,272
+(+333,824 bytes, 0.48 MB)**.
+
+## 54.3 Capability results (all five passed)
+
+| Case | Result |
+|---|---|
+| ZIP, stored | `entries=2 bytes=23` |
+| ZIP, Deflate | `entries=2 bytes=231` |
+| 7z, LZMA1 | `entries=1 bytes=27328` |
+| 7z, LZMA2 | `entries=1 bytes=27328` |
+| RAR5, compressed | `entries=1 bytes=1200` |
+
+Samples came from libarchive's own uu-encoded test corpus, decoded into a
+scratch directory for the measurement and not committed.
+
+**RAR/RAR5 requires no extra compression dependency**, verified two ways:
+it decoded at stage A′ with no zlib and no liblzma present, and
+`archive_read_support_format_rar5.c` guards its `zlib.h` include with
+`#ifdef HAVE_ZLIB_H`, falling back to a bundled `archive_crc32.h`.
+
+## 54.4 Single executable and dependency closure
+
+The import table of the final binary lists exactly what the baseline
+listed — `KERNEL32.dll`, `ntdll.dll`, `VCRUNTIME140.dll`. **No `zlib.dll`,
+no `lzma.dll`, no `archive.dll`**, so the spike added no runtime dependency
+(§44). The three are statically linked; `build.rs` names `zlibstatic` and
+`lzma` explicitly so no import library can be picked up by accident.
+
+Vendored tree sizes, measured:
+
+| | Extracted | Files |
+|---|---|---|
+| libarchive 3.8.9 | 27,702,476 B (library alone 18,764,074 B) | 1,683 (library 1,023) |
+| zlib 1.3.1 | 4,390,808 B | 253 |
+| xz 5.6.4 | 9,410,885 B (liblzma 1,405,271 B) | 605 (liblzma 166) |
+
+Tarball SHA-256 values and source URLs are recorded in
+`third_party/UPSTREAM.md`.
+
+## 54.5 7-Zip comparison — closed without implementation
+
+Measured from the official `7z2603-src.tar.xz` (1,552,200 bytes):
+
+| | 7-Zip 26.03 | libarchive 3.8.9 |
+|---|---|---|
+| Source tree | 10,146,430 B / 1,292 files (999 C/C++) | 27,702,476 B / 1,683 |
+| License | **GNU LGPL v2.1+**; `Compress/Rar*` is LGPL **plus** the unRAR restriction | **BSD-3-Clause** |
+| Build system | nmake makefiles, **no CMakeLists.txt** | CMake |
+| Readers present | `ZipHandler.cpp`, `7zHandler.cpp`, `Rar5Handler.cpp` | yes |
+
+The license difference is the substantive one: Toss ships as a statically
+linked single executable, and 7-Zip's LGPL is copyleft while all three
+adopted libraries are permissive. That contrast is a fact read from
+`7z-src/DOC/License.txt`, not an opinion.
+
+**Recorded as `unknown`, deliberately not estimated:**
+
+- binary-size delta of a 7-Zip-based integration
+- whether a minimal zip/7z/rar-only TU set builds under our CMake/MSVC flow
+- effort and shape of the C++ → C ABI → FFI adapter §11 would require
+- end-to-end capability equivalence
+
+Producing those numbers would mean building a second backend, which is
+exactly what was ruled out before the data existed. An unmeasured estimate
+would be worse than `unknown`.
+
+**No second backend is implemented, and no C++ adapter spike is to be
+undertaken.** Re-evaluation is permitted only if libarchive demonstrates a
+capability gap confirmed by a test — multi-volume or a concrete
+compatibility failure, for instance — under the criteria in §49.
+
+## 54.6 What this replaced
+
+Before this record the reasoning was "libarchive seems like a reasonable
+choice". It is now "libarchive plus the two codecs it needs adds 333,824
+bytes and every target format decodes". For a project where §16 makes
+binary size a first-class metric, the second sentence is the one that
+justifies the decision.
