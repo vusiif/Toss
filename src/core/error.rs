@@ -12,7 +12,7 @@ use crate::core::exit_code::ExitCode;
 
 /// A failure Toss reports instead of panicking.
 #[derive(Debug)]
-#[allow(dead_code)] // `CorruptInput` and `OutputConflict` wait on archive validation (§28) and conflict policy (§27).
+#[allow(dead_code)] // `UnsupportedFormat`, `CorruptInput` and `OutputConflict` are the §24 codes reserved for format handling (Phase 4) and conflict policy (§27).
 pub enum TossError {
     InvalidArguments(String),
     InputNotFound(PathBuf),
@@ -29,12 +29,6 @@ impl TossError {
     #[must_use]
     pub fn invalid_arguments(message: impl Into<String>) -> Self {
         Self::InvalidArguments(message.into())
-    }
-
-    /// Build an error for a path no handler claims.
-    #[must_use]
-    pub fn unsupported_format(path: impl Into<PathBuf>) -> Self {
-        Self::UnsupportedFormat(path.into())
     }
 
     /// Build an error for a route Toss recognises but has not written yet.
@@ -128,7 +122,7 @@ mod tests {
                 ExitCode::PermissionDenied,
             ),
             (
-                TossError::unsupported_format(path.clone()),
+                TossError::UnsupportedFormat(path.clone()),
                 ExitCode::UnsupportedFormat,
             ),
             (
@@ -178,7 +172,7 @@ mod tests {
 
     #[test]
     fn a_unicode_path_survives_into_the_message() {
-        let err = TossError::unsupported_format(PathBuf::from("报告 😊.zip"));
+        let err = TossError::UnsupportedFormat(PathBuf::from("报告 😊.zip"));
         assert_eq!(
             err.to_string(),
             "no handler for this input yet: 报告 😊.zip"

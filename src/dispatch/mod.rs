@@ -5,15 +5,17 @@
 //! claims it.
 //!
 //! No handler is registered yet — archives, media and images arrive in later
-//! phases — so every route ends in an honest refusal rather than a fabricated
-//! success. The refusal names the specific action that is missing, because
-//! "I cannot view this image" is more useful than a generic failure (§5).
-//! Silent fake work would be worse than no work at all.
+//! phases — so every automatic input currently falls through to the info
+//! fallback. That is the whole point of the fallback: `toss <anything>` must
+//! stay useful rather than answer "unsupported file" (§7). The report says
+//! what the input is; the error line says which default action could not be
+//! performed, so nothing is claimed that did not happen (§5, §24).
 
 use std::path::PathBuf;
 
 use crate::cli::{Command, Verb};
 use crate::core::error::TossError;
+use crate::core::info;
 use crate::core::input::{self, Input};
 use crate::core::log;
 use crate::detection::{self, Kind};
@@ -64,19 +66,26 @@ fn resolve_inputs(paths: &[PathBuf]) -> Result<Vec<Input>, TossError> {
 /// Hand a classified input to the handler that claims it.
 ///
 /// This is the seam a handler registry plugs into once the first real handler
-/// lands (Phase 4). Until then every route refuses, and the refusal says which
-/// action is missing rather than reporting work that never happened.
+/// lands (Phase 4). Until then automatic mode reports what the input is, and
+/// states plainly which action it could not perform.
 fn route(verb: Option<Verb>, input: &Input, kind: Kind) -> Result<(), TossError> {
     match verb {
         // An explicit verb already states the intent, so the reply names it.
+        // Requesting an action is not a request for a description (§4.2).
         Some(verb) => Err(TossError::not_implemented(verb.as_str())),
-        // Automatic mode replies with the default action for this kind (§5).
-        // An unrecognised file has no action to name, so the reply is about
-        // the file itself, which is what the info fallback will build on (§7).
-        None => match kind.default_action() {
-            Some(action) => Err(TossError::not_implemented(action)),
-            None => Err(TossError::unsupported_format(input.path().to_path_buf())),
-        },
+
+        // Automatic mode: describe the input first (§7), then say whether a
+        // default action existed that could not be carried out (§5).
+        None => {
+            log::out(&info::gather(input.path()).render(kind.label()));
+
+            match kind.default_action() {
+                Some(action) => Err(TossError::not_implemented(action)),
+                // Nothing was ever going to happen to this file, so the
+                // description is the entire answer — and that is a success.
+                None => Ok(()),
+            }
+        }
     }
 }
 
@@ -106,14 +115,28 @@ mod tests {
     }
 
     #[test]
-    fn an_existing_path_is_resolved_before_it_is_routed() {
+    fn an_existing_input_is_resolved_before_it_is_routed() {
+        // A directory has a defined default action (§5), so routing reaches
+        // the refusal rather than stopping at resolution. The missing-input
+        // case is covered separately below.
         let err = run(Command::Automatic {
-            paths: vec![manifest("Cargo.toml")],
+            paths: vec![manifest("src")],
         })
-        .expect_err("no handler exists yet");
+        .expect_err("directory compression has no handler yet");
 
         assert_eq!(err.exit_code(), ExitCode::UnsupportedFormat);
-        assert!(err.to_string().contains("Cargo.toml"));
+        assert!(err.to_string().contains("directory compression"));
+    }
+
+    #[test]
+    fn an_unknown_file_is_described_instead_of_being_rejected() {
+        // §7: `toss <anything>` has defined behaviour, and for an input no
+        // default action covers, describing it *is* that behaviour.
+        let err = run(Command::Automatic {
+            paths: vec![manifest("Cargo.toml")],
+        });
+
+        assert!(err.is_ok(), "an unknown file must not fail: {err:?}");
     }
 
     #[test]
@@ -171,7 +194,7 @@ mod tests {
     }
 
     #[test]
-    fn automatic_mode_names_the_action_that_is_missing_rather_than_a_bare_failure() {
+    fn a_kind_with_a_default_action_states_the_action_it_could_not_perform() {
         let path = manifest("Cargo.toml");
 
         let cases = [
@@ -191,16 +214,6 @@ mod tests {
                 "expected {action} in: {err}"
             );
         }
-    }
-
-    #[test]
-    fn an_unrecognised_file_is_reported_by_path_so_the_info_fallback_can_build_on_it() {
-        let path = manifest("Cargo.toml");
-        let err = route(None, &Input::File(path.clone()), Kind::Unknown)
-            .expect_err("unknown inputs are refused for now");
-
-        assert_eq!(err.exit_code(), ExitCode::UnsupportedFormat);
-        assert!(err.to_string().contains("Cargo.toml"));
     }
 
     #[test]

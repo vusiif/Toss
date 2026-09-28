@@ -7,5 +7,6 @@
 
 pub mod error;
 pub mod exit_code;
+pub mod info;
 pub mod input;
 pub mod log;

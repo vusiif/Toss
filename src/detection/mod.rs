@@ -47,6 +47,17 @@ impl Kind {
             Self::Unknown => None,
         }
     }
+
+    /// The word this kind is reported under (§7).
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Directory => "directory",
+            Self::Archive => "archive",
+            Self::Image => "image",
+            Self::Media => "media",
+            Self::Unknown => "unknown",
+        }
+    }
 }
 
 /// Bytes a fallback probe may read, whatever the file's size (§35).
