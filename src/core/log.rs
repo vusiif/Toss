@@ -5,6 +5,11 @@
 
 use std::fmt;
 
+/// Write a normal result line to stdout.
+pub fn out(message: &str) {
+    println!("{message}");
+}
+
 /// Write an error line to stderr as `Error: ...`.
 pub fn error(err: impl fmt::Display) {
     eprintln!("Error: {err}");

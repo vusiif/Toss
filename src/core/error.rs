@@ -3,30 +3,25 @@
 //! User-controlled input must never reach `unwrap`, `expect` or `panic!` (§23).
 //! It becomes one of these instead: a message a human can act on, paired with
 //! the exit code a script will observe (§24).
-//!
-//! The variants mirror the §24 exit-code table one for one. Most have no
-//! constructor yet, because nothing in this phase can produce that failure —
-//! input resolution, conflict policy and archive validation arrive later and
-//! each adds its own constructor as it lands.
 
 use std::fmt;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::core::exit_code::ExitCode;
 
 /// A failure Toss reports instead of panicking.
 #[derive(Debug)]
-#[allow(dead_code)] // Reserved failure modes; each gains a constructor when its phase lands.
+#[allow(dead_code)] // `CorruptInput` and `OutputConflict` wait on archive validation (§28) and conflict policy (§27).
 pub enum TossError {
     InvalidArguments(String),
     InputNotFound(PathBuf),
     PermissionDenied(PathBuf),
     UnsupportedFormat(PathBuf),
+    NotImplemented(String),
     CorruptInput(PathBuf),
     OutputConflict(PathBuf),
     Io(io::Error),
-    Other(String),
 }
 
 impl TossError {
@@ -42,6 +37,25 @@ impl TossError {
         Self::UnsupportedFormat(path.into())
     }
 
+    /// Build an error for a route Toss recognises but has not written yet.
+    #[must_use]
+    pub fn not_implemented(what: impl Into<String>) -> Self {
+        Self::NotImplemented(what.into())
+    }
+
+    /// Map an IO failure onto the most specific variant for `path`.
+    ///
+    /// Existence and permission problems get their own exit codes rather than
+    /// collapsing into a generic failure, so scripts can branch on them (§24).
+    #[must_use]
+    pub fn from_io(path: &Path, err: io::Error) -> Self {
+        match err.kind() {
+            io::ErrorKind::NotFound => Self::InputNotFound(path.to_path_buf()),
+            io::ErrorKind::PermissionDenied => Self::PermissionDenied(path.to_path_buf()),
+            _ => Self::Io(err),
+        }
+    }
+
     /// The exit status this error maps to (§24).
     #[must_use]
     pub fn exit_code(&self) -> ExitCode {
@@ -49,9 +63,9 @@ impl TossError {
             Self::InvalidArguments(_) => ExitCode::InvalidArguments,
             Self::InputNotFound(_) => ExitCode::NotFound,
             Self::PermissionDenied(_) => ExitCode::PermissionDenied,
-            Self::UnsupportedFormat(_) => ExitCode::UnsupportedFormat,
+            Self::UnsupportedFormat(_) | Self::NotImplemented(_) => ExitCode::UnsupportedFormat,
             Self::CorruptInput(_) => ExitCode::CorruptInput,
-            Self::OutputConflict(_) | Self::Io(_) | Self::Other(_) => ExitCode::Failure,
+            Self::OutputConflict(_) | Self::Io(_) => ExitCode::Failure,
         }
     }
 }
@@ -67,12 +81,12 @@ impl fmt::Display for TossError {
             Self::UnsupportedFormat(path) => {
                 write!(f, "no handler for this input yet: {}", path.display())
             }
+            Self::NotImplemented(what) => write!(f, "not implemented yet: {what}"),
             Self::CorruptInput(path) => {
                 write!(f, "input is corrupted or incomplete: {}", path.display())
             }
             Self::OutputConflict(path) => write!(f, "output already exists: {}", path.display()),
             Self::Io(err) => write!(f, "{err}"),
-            Self::Other(message) => write!(f, "{message}"),
         }
     }
 }
@@ -102,9 +116,15 @@ mod tests {
                 TossError::invalid_arguments("bad flag"),
                 ExitCode::InvalidArguments,
             ),
-            (TossError::InputNotFound(path.clone()), ExitCode::NotFound),
             (
-                TossError::PermissionDenied(path.clone()),
+                TossError::from_io(&path, std::io::Error::from(std::io::ErrorKind::NotFound)),
+                ExitCode::NotFound,
+            ),
+            (
+                TossError::from_io(
+                    &path,
+                    std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+                ),
                 ExitCode::PermissionDenied,
             ),
             (
@@ -112,15 +132,18 @@ mod tests {
                 ExitCode::UnsupportedFormat,
             ),
             (
+                TossError::not_implemented("extract"),
+                ExitCode::UnsupportedFormat,
+            ),
+            (
                 TossError::CorruptInput(path.clone()),
                 ExitCode::CorruptInput,
             ),
-            (TossError::OutputConflict(path.clone()), ExitCode::Failure),
+            (TossError::OutputConflict(path), ExitCode::Failure),
             (
                 TossError::Io(std::io::Error::from(std::io::ErrorKind::Other)),
                 ExitCode::Failure,
             ),
-            (TossError::Other("boom".to_owned()), ExitCode::Failure),
         ];
 
         for (err, expected) in cases {
@@ -130,13 +153,27 @@ mod tests {
 
     #[test]
     fn io_failures_keep_their_source_context() {
+        // Anything that is not plainly "missing" or "denied" stays an `Io`
+        // error, so the underlying reason survives for debugging (§23).
         let err = TossError::Io(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "no such entry",
+            std::io::ErrorKind::InvalidData,
+            "truncated header",
         ));
 
         let source = std::error::Error::source(&err).expect("Io carries a source");
-        assert!(source.to_string().contains("no such entry"));
+        assert!(source.to_string().contains("truncated header"));
+    }
+
+    #[test]
+    fn an_unrecognised_io_failure_is_not_mislabelled_as_a_missing_input() {
+        let path = PathBuf::from("broken.zip");
+        let err = TossError::from_io(
+            &path,
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "truncated"),
+        );
+
+        assert_eq!(err.exit_code(), ExitCode::Failure);
+        assert!(!matches!(err, TossError::InputNotFound(_)));
     }
 
     #[test]

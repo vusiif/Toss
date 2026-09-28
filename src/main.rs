@@ -7,10 +7,9 @@ mod backend;
 mod cli;
 mod core;
 mod detect;
+mod dispatch;
 mod handlers;
 mod platform;
-
-use std::path::PathBuf;
 
 use crate::core::{error::TossError, exit_code::ExitCode, log};
 
@@ -24,20 +23,11 @@ fn main() -> std::process::ExitCode {
     }
 }
 
-/// Resolve the command line and hand it to the dispatcher.
+/// Parse the command line, resolve its inputs, and dispatch it (§9).
 ///
-/// Only the exit-code contract is final here: a user-facing error on stderr
-/// plus a meaningful status (§24, §25). Phase 1 replaces the body with real
-/// argument parsing and dispatch; until then Toss says plainly that no
-/// handler has claimed the input instead of pretending it succeeded.
+/// Anything that goes wrong comes back as an error carrying both a message
+/// for the human and an exit code for the script; nothing here panics on
+/// input the user chose (§23, §24).
 fn run() -> Result<(), TossError> {
-    let Some(input) = std::env::args_os().nth(1) else {
-        return Err(TossError::invalid_arguments(
-            "no input given; try `toss <path>`",
-        ));
-    };
-
-    // `OsString` -> `PathBuf` keeps every byte of the original path, so
-    // spaces, CJK text and emoji survive intact (§22).
-    Err(TossError::unsupported_format(PathBuf::from(input)))
+    dispatch::run(cli::parse(std::env::args_os().skip(1))?)
 }

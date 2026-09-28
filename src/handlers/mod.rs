@@ -9,4 +9,9 @@
 //! create new output, then modify original, then delete. Nothing here may
 //! become an automatic destructive default.
 //!
+//! Dispatching lives in `dispatch/`; this module is where handlers themselves
+//! are declared and registered, and it stays empty until the first real one
+//! arrives in Phase 4. Building the registration machinery before there is
+//! anything to register would be abstraction for its own sake (§42).
+//!
 //! Phases 4 through 7 fill this module.
