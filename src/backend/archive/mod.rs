@@ -14,6 +14,12 @@
 
 pub mod types;
 
+/// The native binding, present only when the `archive` feature is on (§14,
+/// §32). Everything libarchive-specific stays inside, and a build without
+/// the feature still compiles the trait, the domain types and the router.
+#[cfg(feature = "archive")]
+pub mod libarchive;
+
 pub use types::{
     ArchiveCapabilities, ArchiveEntry, ArchiveError, ArchiveFormat, ArchiveInput, ArchiveProbe,
     ExtractRequest, ExtractResult,
