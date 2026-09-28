@@ -92,3 +92,54 @@ jobs:
             echo
             echo "$bin: **$size bytes**"
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # `rust-version` in Cargo.toml is a promise that the oldest compiler we
+  # claim to support still works. Without this job the promise quietly rots:
+  # someone writes a newer construct, every CI run stays green because CI uses
+  # stable, and the declared floor becomes a lie.
+  msrv:
+    name: MSRV (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Read the supported floor from Cargo.toml
+        id: msrv
+        shell: bash
+        run: |
+          # Cargo.toml is the single source of truth: bumping rust-version
+          # there is what changes this job, and nothing here repeats the number.
+          version=$(sed -n 's/^rust-version = "\(.*\)"$/\1/p' Cargo.toml)
+          if [ -z "$version" ]; then
+            echo "::error::rust-version is missing from Cargo.toml"
+            exit 1
+          fi
+          case "$version" in
+            *.*.*) ;;
+            *) version="${version}.0" ;;
+          esac
+          echo "toolchain=$version" >> "$GITHUB_OUTPUT"
+          echo "MSRV toolchain: $version"
+
+      - name: Install the floor toolchain
+        shell: bash
+        run: |
+          rustup set profile minimal
+          rustup toolchain install "${{ steps.msrv.outputs.toolchain }}" --no-self-update
+
+      # Formatting and lints are deliberately left to the stable job above:
+      # rustfmt and clippy disagree with themselves across releases, so pinning
+      # them here would fail the build for reasons unrelated to the compiler
+      # floor this job exists to protect.
+      - name: Build at the floor
+        shell: bash
+        run: cargo +${{ steps.msrv.outputs.toolchain }} build --locked --all-features
+
+      - name: Test at the floor
+        shell: bash
+        run: cargo +${{ steps.msrv.outputs.toolchain }} test --locked --all-features
