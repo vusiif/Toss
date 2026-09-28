@@ -55,6 +55,10 @@ fn main() {
 
 /// Resolve the CMake executable: `CMAKE` wins, then `PATH`.
 ///
+/// Presence is decided by actually running it rather than by guessing at
+/// file names: the first attempt checked only for `cmake.exe` and therefore
+/// declared CMake missing on Linux, where the binary is plain `cmake`.
+///
 /// The failure message is written for a developer rather than a log file,
 /// because the only fix is installing CMake or pointing at it.
 fn find_cmake() -> String {
@@ -62,26 +66,21 @@ fn find_cmake() -> String {
         return path.to_string_lossy().into_owned();
     }
 
-    if which("cmake").is_some() {
+    let runs = Command::new("cmake")
+        .arg("--version")
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false);
+
+    if runs {
         return "cmake".to_owned();
     }
 
     panic!(
         "\n\nCMake was not found, and libarchive needs it to build.\n\
          Install CMake and put it on PATH, or point at it directly:\n\n  \
-         CMAKE=\"C:/path/to/cmake.exe\" cargo build --features archive\n"
+         CMAKE=/path/to/cmake cargo build --features archive\n"
     );
-}
-
-fn which(program: &str) -> Option<PathBuf> {
-    let path = env::var_os("PATH")?;
-    for directory in env::split_paths(&path) {
-        let candidate = directory.join(format!("{program}.exe"));
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-    }
-    None
 }
 
 fn configure(cmake: &str, source: &Path, build: &Path) {
