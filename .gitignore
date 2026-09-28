@@ -1,10 +1,13 @@
 # Build artifacts
 /target
 
-# Documentation — only README.md is version-controlled.
-# Everything else (*.md notes, docs/, doc/) is excluded from commits.
+# Documentation — only the files whitelisted here are version-controlled.
+# Everything else (*.md notes, docs/, doc/) stays out of commits.
+# ARCHIVE_BACKEND.md is whitelisted because it constrains future agents;
+# a rule nobody can see after cloning is not a rule.
 *.md
 !README.md
+!ARCHIVE_BACKEND.md
 docs/
 doc/
 
