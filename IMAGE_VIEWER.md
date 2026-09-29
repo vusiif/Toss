@@ -251,20 +251,27 @@ re-measured and recorded when it moves; §9 below holds the measurement.
 
 ## 7. unsafe and FFI policy
 
+There is no `raw.rs`, and there will not be one. `windows-rs` **is** the raw
+declaration layer — that is most of what the §6 decision bought.
+
 ```text
-platform/windows/image/raw.rs     every unsafe extern declaration, one place
-platform/windows/image/viewer.rs  RAII: window handle, DIB, DC, COM pointers
-platform/image.rs                 cfg only, no unsafe
+platform/windows/image/viewer.rs   every unsafe block in Phase 6
+platform/windows/image/mod.rs      no unsafe; only the call into the viewer
+platform/image.rs                  cfg only, no unsafe
 handlers/ core/ dispatch/ detection/   zero unsafe, zero Windows types
 ```
 
-- Layering is `raw declarations → RAII wrapper → viewer → handler`, so a raw
-  pointer never reaches a handler (§32 of `Toss_AGENTS.md`).
-- Two existing lints already enforce the documentation half:
-  `clippy::undocumented_unsafe_blocks` and `rust::unsafe_op_in_unsafe_fn`.
-- `windows-rs` removes the hand-written vtable ABI from this surface; what
-  remains unsafe here is lifetime-bearing work (handles, pointers), which is
-  exactly the part that must be reviewed by a human.
+- Layering is `windows-rs declarations → viewer → capability facade → handler`,
+  so a raw pointer never reaches a handler (§32 of `Toss_AGENTS.md`).
+- Two existing lints enforce the documentation half:
+  `clippy::undocumented_unsafe_blocks` — M1 tripped it twice, and both were
+  fixed rather than allowed out — and `rust::unsafe_op_in_unsafe_fn`.
+- What remains unsafe is lifetime-bearing work: a window handle that must be
+  live when it is used, a struct whose fields the system reads across the
+  call. That is the part a human has to review; the ABI itself is generated.
+- Handles the system owns — the module handle, the shared cursor, the stock
+  brush — are never freed here. The viewer does not pretend to own what it
+  does not own.
 
 ---
 
@@ -303,17 +310,30 @@ hides `windows` entirely.
 
 ## 9. Measured data
 
-| What | Value | When |
-|---|---|---|
-| Release `--all-features`, before Phase 6 | **664,064 B** | at commit `973b910` |
-| Release without features, before Phase 6 | **189,952 B** | at commit `973b910` |
-| `windows-rs` floor contribution | **+4,096 B** | §6 spike |
-| Transitive crates added | **15** | §6 spike |
+Release `cargo build --release --locked`, both feature sets, measured at each
+milestone rather than accumulated:
 
-Milestones M1–M11 append their own release measurements here as they land, and
-the Phase 6 completion report closes the table. Composition that is reasoned
-rather than measured is labelled as such — `ARCHIVE_BACKEND.md` §56.4 set the
-standard.
+| Milestone | `--all-features` | without features | change |
+|---|---|---|---|
+| before Phase 6 (`973b910`) | 664,064 | 189,952 | — |
+| M0, the boundary (`471cab1`) | 677,376 | 206,848 | +13,312 / +16,896 |
+| M1, the window | 685,056 | 206,848 | +7,680 / 0 |
+
+Plus, from the §6 spike: `windows-rs` floor **+4,096 B**, transitive crates
+**+15**.
+
+Two things this table is honest about:
+
+- **M0 grew the small build more than the large one** (+16,896 against
+  +13,312). The totals are measured; *why* the two moved by different amounts
+  is not, and it is not decomposed here. `ARCHIVE_BACKEND.md` §56.4 set the
+  standard: a composition that is reasoned rather than measured says so.
+- **M1's window code costs 0 bytes without the feature**, which is what the
+  target-gated optional dependency is for: a build that never asked for the
+  viewer does not carry it.
+
+Milestones M2 onward append rows here as they land, and the Phase 6 completion
+report closes the table.
 
 ---
 
@@ -339,7 +359,7 @@ Stop and re-approve before continuing if a milestone would change any of:
 the dependency closure      (adding or widening a crate)
 the single-binary guarantee (any sidecar file, any build script, any native step)
 the platform boundary       (a Windows type above platform/image.rs)
-the unsafe model            (unsafe outside raw.rs / viewer.rs)
+the unsafe model            (unsafe outside viewer.rs)
 the Windows 19045 floor     (an API whose minimum supported client is higher)
 ```
 

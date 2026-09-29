@@ -276,25 +276,57 @@ mod tests {
 
     #[test]
     fn a_kind_with_a_default_action_states_the_action_it_could_not_perform() {
-        let path = manifest("Cargo.toml");
+        // `Kind::Archive`, `Kind::Directory` and `Kind::Image` are absent on
+        // purpose: all three are wired to handlers now, so none of them
+        // reports a missing action.
+        //
+        // `Kind::Image` needs more than omission, though. On Windows with the
+        // `image` feature its handler opens a real window and blocks in the
+        // message loop, which is the last thing a unit test may do — so that
+        // arm is covered by the test below instead, on an input that refuses
+        // before any window could be reached.
+        let err = route(None, &Input::File(manifest("Cargo.toml")), Kind::Media)
+            .expect_err("there is no media player yet");
 
-        // `Kind::Archive` and `Kind::Directory` are absent on purpose: both
-        // are wired to handlers now, so neither reports a missing action.
-        let cases = [
-            (Kind::Image, "image viewing"),
-            (Kind::Media, "media playback"),
-        ];
+        assert_eq!(err.exit_code(), ExitCode::UnsupportedFormat);
+        assert!(
+            err.to_string().contains("media playback"),
+            "expected media playback in: {err}"
+        );
+    }
 
-        for (kind, action) in cases {
-            let err =
-                route(None, &Input::File(path.clone()), kind).expect_err("no handler exists yet");
+    #[test]
+    fn an_image_reaches_the_viewer_handler_without_opening_a_window() {
+        // The arm is what is under test. `Kind::Image` never pairs with a
+        // directory in real use — a directory is decided before any extension
+        // logic runs (§6.1) — so pairing them here is deliberate: it drives
+        // the same arm and lands on the handler's refusal rather than on a
+        // window, on every platform and in both feature configurations.
+        let err = route(None, &Input::Directory(manifest("src")), Kind::Image)
+            .expect_err("a folder is not a picture");
 
-            assert_eq!(err.exit_code(), ExitCode::UnsupportedFormat);
-            assert!(
-                err.to_string().contains(action),
-                "expected {action} in: {err}"
-            );
-        }
+        assert_eq!(err.exit_code(), ExitCode::InvalidArguments);
+        assert!(
+            err.to_string().contains("is not an image file"),
+            "expected the handler's own complaint, got: {err}"
+        );
+    }
+
+    #[test]
+    fn the_view_verb_reaches_the_viewer_handler() {
+        // Same refusal through the other arm, and this one is a mistake a
+        // person can really make: `toss view Documents/` (§4.2).
+        let err = run(Command::Explicit {
+            verb: Verb::View,
+            args: vec![manifest("src")],
+        })
+        .expect_err("a folder is not a picture");
+
+        assert_eq!(err.exit_code(), ExitCode::InvalidArguments);
+        assert!(
+            err.to_string().contains("is not an image file"),
+            "expected the handler's own complaint, got: {err}"
+        );
     }
 
     #[test]
