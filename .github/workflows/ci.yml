@@ -6,6 +6,12 @@ on:
   pull_request:
     branches: [master]
 
+# A newer commit makes the run in flight pointless: cancel it instead of
+# paying for two. Ten pushes to one PR should not be ten full runs.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -31,6 +37,11 @@ jobs:
           rustup default stable
           rustup component add --toolchain stable rustfmt clippy
 
+      # Default behaviour, deliberately. build.rs compiles zlib, liblzma and
+      # libarchive inside target/, so caching target/ caches the native build
+      # too — no separate key, no extra directory to reason about.
+      - uses: Swatinem/rust-cache@v2
+
       - name: Formatting
         shell: bash
         run: cargo fmt --check
@@ -43,12 +54,18 @@ jobs:
         shell: bash
         run: cargo test --locked --all-features
 
+      # Everything below is Windows-only. toss.exe is the product, so the
+      # release build, the CLI behaviour it exercises and the size it records
+      # are all Windows concerns; the Linux leg exists to refuse a core that
+      # leans on a Windows-only API (§10), and a Linux binary is never shipped.
       - name: Release build
+        if: runner.os == 'Windows'
         shell: bash
         run: cargo build --release --locked --all-features
 
       - name: Locate binary
         id: binary
+        if: runner.os == 'Windows'
         shell: bash
         run: |
           if [ -f target/release/toss.exe ]; then
@@ -58,6 +75,7 @@ jobs:
           fi
 
       - name: Smoke test
+        if: runner.os == 'Windows'
         shell: bash
         run: |
           bin="${{ steps.binary.outputs.path }}"
@@ -82,6 +100,7 @@ jobs:
           fi
 
       - name: Record binary size
+        if: runner.os == 'Windows'
         shell: bash
         run: |
           bin="${{ steps.binary.outputs.path }}"
@@ -97,13 +116,14 @@ jobs:
   # claim to support still works. Without this job the promise quietly rots:
   # someone writes a newer construct, every CI run stays green because CI uses
   # stable, and the declared floor becomes a lie.
+  #
+  # One platform is enough for that claim. Compiler-floor failure and
+  # Windows-specific behaviour are different questions, and the stable Windows
+  # leg already owns the second — running MSRV on both platforms was proving
+  # the same thing twice.
   msrv:
-    name: MSRV (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
+    name: MSRV (ubuntu-latest)
+    runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v5
@@ -132,14 +152,15 @@ jobs:
           rustup set profile minimal
           rustup toolchain install "${{ steps.msrv.outputs.toolchain }}" --no-self-update
 
-      # Formatting and lints are deliberately left to the stable job above:
-      # rustfmt and clippy disagree with themselves across releases, so pinning
-      # them here would fail the build for reasons unrelated to the compiler
-      # floor this job exists to protect.
-      - name: Build at the floor
-        shell: bash
-        run: cargo +${{ steps.msrv.outputs.toolchain }} build --locked --all-features
+      # After the toolchain install: the cache key includes the compiler
+      # version, so the toolchain has to exist before the cache is addressed.
+      - uses: Swatinem/rust-cache@v2
 
-      - name: Test at the floor
+      # `check` is enough for a compiler-floor claim. Formatting and lints are
+      # deliberately left to the stable job: rustfmt and clippy disagree with
+      # themselves across releases, so pinning them here would fail the build
+      # for reasons unrelated to the floor this job exists to protect. Tests
+      # belong to the stable legs — running them again here only repeated them.
+      - name: Check at the floor
         shell: bash
-        run: cargo +${{ steps.msrv.outputs.toolchain }} test --locked --all-features
+        run: cargo +${{ steps.msrv.outputs.toolchain }} check --locked --all-features
