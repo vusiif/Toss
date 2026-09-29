@@ -47,9 +47,9 @@ fn main() {
                 .display()
         );
     }
-    println!("cargo:rustc-link-lib=static=archive");
-    println!("cargo:rustc-link-lib=static=zlibstatic");
-    println!("cargo:rustc-link-lib=static=lzma");
+    for library in [&archive, &zlib, &lzma] {
+        println!("cargo:rustc-link-lib=static={}", link_name(library));
+    }
 
     if env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
         // libarchive reaches for BCryptGenRandom on Windows even with CNG
@@ -60,6 +60,26 @@ fn main() {
             println!("cargo:rustc-link-lib={system}");
         }
     }
+}
+
+/// The name `cargo:rustc-link-lib` needs for a library we just located.
+///
+/// MSVC calls it `zlibstatic.lib` and GNU calls it `libz.a`, and the two
+/// toolchains want different link names — hard-coding `zlibstatic` is what
+/// made every Linux leg die with `cannot find -lzlibstatic` while Windows
+/// passed. Deriving the name from the file actually found keeps both honest.
+fn link_name(library: &Path) -> String {
+    let name = library
+        .file_name()
+        .expect("a library file has a name")
+        .to_string_lossy();
+
+    if let Some(stem) = name.strip_suffix(".lib") {
+        return stem.to_owned();
+    }
+
+    let stem = name.strip_prefix("lib").unwrap_or(&name);
+    stem.strip_suffix(".a").unwrap_or(stem).to_owned()
 }
 
 /// Resolve the CMake executable: `CMAKE` wins, then `PATH`.
