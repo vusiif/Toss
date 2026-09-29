@@ -2538,3 +2538,256 @@ forces the linker to keep more than it needs. The first time a handler is
 wired end to end the number will move again, and §27 asks for that to be
 recorded when it does rather than smoothed over.
 
+> §56.4 records the movement. The prediction was right about the movement
+> and wrong about the trigger: extraction was already wired by the time step
+> 8 measured, and the number that moved was Phase 5's.
+
+---
+
+# 56. Phase 4 Completion Report (step 10)
+
+> Status: **Complete**
+>
+> Measured at commit `5167a13`, working tree clean, primary development
+> target (Windows x64, MSVC). Every figure below was produced by running the
+> command it names. Nothing here is estimated.
+
+Phase 4's ten steps are done. Phase 5 (`toss folder/` → `folder.7z`) landed
+afterwards and is included where a number or a capability would otherwise be
+stale — the honest answer to "what does Phase 4 ship" is now inseparable from
+what the archive subsystem does today.
+
+## 56.1 Formats actually enabled
+
+Read, registered **by name** in `Reader::register` — never
+`archive_read_support_format_all`, because naming a format here means Toss has
+admitted it (§3, §37):
+
+```text
+ZIP          archive_read_support_format_zip
+7z           archive_read_support_format_7zip
+RAR 4.x      archive_read_support_format_rar
+RAR 5.x      archive_read_support_format_rar5
+```
+
+Write, advertised through `ArchiveCapabilities::write`:
+
+```text
+7z           archive_write_set_format_7zip
+```
+
+**No compression *filters* are registered.** ZIP, 7z and RAR carry their own
+entropy coding inside the container, so none of them needs one. The
+consequence is worth stating plainly rather than leaving to be discovered:
+`.tar`, `.tar.gz`, `.tar.xz` and `.tar.bz2` are not readable, because neither
+the tar container nor the gzip/xz/bzip2 filter was ever enabled (§15, §37).
+They were not in §18.1's milestone and they are not in this report as support.
+
+The capability router reports exactly what is above: `read = [Zip, SevenZip,
+Rar]`, `write = [SevenZip]`. RAR 4.x and RAR 5.x are two libarchive readers
+and one Toss format (§6).
+
+## 56.2 Operations actually supported
+
+| Operation | Trait method | Product caller |
+|---|---|---|
+| Identify a container | `probe` | none yet — arrives with `toss info` (§4.2, §20) |
+| List members | `list` | none yet — same |
+| Extract into a chosen root | `extract` | `toss archive.7z`, `toss extract archive.7z` |
+| Compress a directory | `create` | `toss folder/`, `toss pack folder/` |
+
+End-to-end CLI behaviour, all verified by `tests/archive.rs` and
+`tests/directory.rs` against the shipped binary:
+
+```text
+toss archive.zip   → archive/            beside the input   (§21)
+toss extract a.7z  → a/                  same destination
+toss folder/       → folder.7z           beside the input   (§26)
+toss pack folder/  → folder.7z           same destination
+```
+
+`probe` and `list` are implemented, tested, and deliberately still behind
+`backend::archive`'s scoped `allow(dead_code)`. That allowance's comment says
+to delete entries as they gain callers and not to add to it; neither has
+happened.
+
+Not supported: no inspection or hash verb, no encryption, no multi-volume, no
+second backend.
+
+## 56.3 Native dependencies
+
+**Unchanged since step 8**, and verifiably so: `git diff eba7886..HEAD --
+build.rs third_party` is empty, so nothing that produces a native library has
+been touched. §55.2 remains the record; summarised:
+
+| | |
+|---|---|
+| `archive.lib` | libarchive **3.8.9** |
+| `lzma.lib` | liblzma **5.6.4** |
+| `zlibstatic.lib` | zlib **1.3.1** |
+| Linkage | static, inside `toss.exe`, no separate files |
+| Runtime imports | `KERNEL32.dll`, `ntdll.dll`, `VCRUNTIME140.dll` — identical to the pre-archive baseline |
+| Build needs | CMake, a C compiler, **no network** — sources are vendored (§25) |
+
+No `zlib.dll`, no `lzma.dll`, no `archive.dll`, no system libarchive.
+
+## 56.4 Binary-size delta
+
+`cargo build --release --locked`, measured, in bytes:
+
+| Build | pre-archive (§55) | Phase 4 complete (§55) | **now** | Δ since §55 |
+|---|---|---|---|---|
+| `--all-features` | 186,880 | 529,920 | **664,064** | **+134,144** |
+| no features | 186,880 | 186,880 | **189,952** | **+3,072** |
+
+Phase 4's own delta, for continuity: **+343,040** (§55.1).
+
+The +134,144 splits into two measured pieces:
+
+```text
+Phase 5 (commit 922de44)        +133,120   529,920 → 663,040
+step 9 corpus + locale fix      +  1,024   663,040 → 664,064
+```
+
+The second figure is test-only changes plus moving the locale pin, and 1,024
+bytes is consistent with code layout shifting rather than anything new being
+compiled in. The first figure is Phase 5's: creating a 7z pulls libarchive's
+7z writer and its LZMA encoder into a link that a read-only build never
+referenced. **That attribution is reasoning, not a measurement** — the two
+totals are measured, the composition between them is not, and §52 asks for
+that distinction to be made rather than blurred.
+
+Unintentional growth: none. Every byte above the §55 line is accounted for by
+a shipped capability.
+
+## 56.5 Tests executed
+
+| | Windows | Linux |
+|---|---|---|
+| unit (`src/`) | 91 | 90 |
+| `tests/archive.rs` (extraction, e2e) | 6 | 6 |
+| `tests/directory.rs` (packing, e2e) | 3 | 3 |
+| **total, `--all-features`** | **100** | **99** |
+| total, no features | 75 | 74 |
+
+The one-test difference is `a_windows_path_keeps_its_directory_and_strips_the_suffix`,
+which is `#[cfg(windows)]` on purpose: a backslash is a separator on Windows
+and an ordinary character on Unix, so asserting Windows path rules on Linux
+would be asserting the wrong thing (§22).
+
+Both integration targets are empty without the `archive` feature — each
+starts with `#![cfg(feature = "archive")]`, because their subject is the
+backend the feature compiles in.
+
+Also run and passing:
+
+```text
+cargo fmt --check                              both platforms
+cargo clippy --all-targets -- -D warnings      both platforms, with and without features
+cargo test --all-features                      both platforms
+LANG=C LC_ALL=C cargo test --all-features      Linux — see §56.7 item 9
+```
+
+Plain `cargo clippy` (no features) was **failing** before this step: `router()`
+needs its `mut` only when a backend is compiled in. CI never saw it because CI
+only runs `--all-features`. Fixed, and now part of what "clippy is green"
+means.
+
+**Corpus: 19 committed samples in 5 folders**, every one executed on every run
+by a sweep that walks the directories rather than naming files, so a sample
+added later is covered without anyone remembering to write a test for it (§29):
+
+```text
+valid/     4     simple.zip simple.7z simple-rar4.rar simple-rar5.rar
+unicode/   2     utf8-paths.zip unicode-rar5.rar
+edge/      5     empty zero-byte-member spaces-in-names deep-directories duplicate-names
+corrupt/   4     malformed.zip malformed.7z truncated corrupt-member
+security/  4     symlink traversal absolute-path drive-path
+```
+
+## 56.6 Security cases covered
+
+| Case | How it is asserted |
+|---|---|
+| `../` traversal | policy unit tests (climbing out, drive, absolute, empty member); a `stored_zip` synthesised in the test; **and** committed `security/traversal.zip` through the real binary |
+| absolute path | `security/absolute-path.zip` end-to-end, plus a check that the named target does not exist at the filesystem root |
+| drive / UNC path | `security/drive-path.zip` end-to-end; policy unit tests for `Prefix` |
+| symlink escape | `security/symlink.zip`: counted, never created (§17) |
+| silent overwrite | extraction and packing both refuse with exit 1 and leave the first result byte-identical (§27) — unit and e2e |
+| corrupt input | `malformed.zip`, `malformed.7z`, `truncated.zip`, `corrupt-member.zip` must all fail on full consumption; corrupt exits **6**, unsupported exits **3**, and the two must not collapse (§24, §42) |
+| Unicode filenames | `utf8-paths.zip`, `unicode-rar5.rar`, plus a round trip that packs and re-extracts a directory whose name is Chinese and contains an emoji |
+| untrusted parsers | `raw.rs` declarations carry their contract; `Reader`, `Writer` and `PendingEntry` are RAII, so a header write that fails halfway still frees what it allocated (§31) |
+| output-location integrity | the sweep asserts two things of every hostile sample: a defined outcome **and** nothing written outside the output root — an archive that "succeeded" through `../` would satisfy a check on the return value alone |
+
+Deliberately **not** covered yet, because nothing implements them:
+
+- archive bombs: no maximum extracted size, no file-count limit, no
+  compression-ratio warning (§18, and §29 of `Toss_AGENTS.md`);
+- encrypted archives;
+- fuzzing (Phase 9).
+
+## 56.7 Known limitations
+
+1. **No archive-bomb limits.** §18's four numbers — compressed size,
+   uncompressed size, file count, ratio — are all available from libarchive and
+   none of them is enforced or reported. The architecture does not preclude it;
+   nothing does it.
+2. **No encryption.** A password-protected archive fails as corrupt input
+   rather than prompting (§19).
+3. **No multi-volume** (§9).
+4. **`probe` and `list` have no product caller.** They are complete and
+   tested; their caller is `toss info`, which is v0.2 (§20).
+5. **No compression filters**, so no `.tar`/`.tar.gz`/`.tar.xz`/`.tar.bz2`
+   (§56.1). Not a regression — none were ever in scope — but it is the answer
+   to "why doesn't this open my tarball".
+6. **RAR is read-only.** libarchive cannot write RAR and Toss does not try
+   (§36: do not reimplement compression).
+7. **Extraction restores paths and bytes, not metadata.** Links, permissions,
+   ownership and timestamps are not written back; what is left out is counted
+   and reported rather than dropped in silence (§17). Round-trip tests compare
+   contents, relative paths and empty directories — not metadata Toss does not
+   claim to preserve (§30).
+8. **Duplicate member names stop extraction.** The second one hits
+   `create_new` and returns a conflict rather than overwriting (§22). Defined
+   and safe; not friendly. `edge/duplicate-names.zip` is the fixture.
+9. **A machine with no `C.UTF-8` is not diagnosed.** `pin_utf8_locale` ignores
+   the result of `setlocale`; on such a machine a non-ASCII name would fail
+   later with libarchive's conversion message, which names the file but not the
+   cause. Verified that `LANG=C` *with* `C.UTF-8` available is fine — 99/99 —
+   because the pin ignores `LANG` by design.
+10. **Exit code 5 (permission denied) has no automated test.** The mapping
+    exists and is table-tested at the enum level; no test makes a real
+    permission failure occur.
+11. **The Phase 5 size attribution in §56.4 is reasoned**, not measured
+    separately.
+12. **All 10 samples added in step 9 are ZIP.** `valid/` covers all four
+    containers Toss reads; the edge, corrupt and hostile shapes were generated
+    from scratch for this repository, and ZIP is the only one of the four whose
+    fixtures this project can produce without shipping a third party's files.
+    7z fixtures are now possible in principle, since `create` exists — see
+    §56.8.
+
+## 56.8 Future capability gaps
+
+Not promises; candidates that must still pass §49's admission checklist.
+
+| Gap | Where it is already written down |
+|---|---|
+| `toss info`, `toss hash` — gives `probe`/`list` their caller | `Toss_AGENTS.md` §20 (v0.2) |
+| archive-bomb limits and ratio warnings | §18 here; `Toss_AGENTS.md` §29 |
+| encrypted archives | §19 here |
+| multi-volume | §9 here |
+| Zstd / LZ4 | §47 here — only after the use case is defined |
+| 7z (and other) edge/corrupt/hostile fixtures | §29 here; `create` now makes them producible |
+| second backend | §49 here; **closed** at §54.5 |
+| fuzz targets over detection, metadata, path resolution | `Toss_AGENTS.md` §34, Phase 9 |
+| `aarch64-pc-windows-msvc` | `Toss_AGENTS.md` §36 |
+| automated exit-code-5 test | §56.7 item 10 |
+
+---
+
+The subsystem is still understandable as one sentence: **give Toss an
+archive, it extracts beside it without touching anything that is already
+there; give it a directory, it packs beside it the same way.** Every number
+above exists to say whether that sentence is true.
+
