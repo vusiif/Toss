@@ -130,6 +130,37 @@ pub struct ExtractResult {
     pub skipped: u64,
 }
 
+/// What to compress, and where the result belongs.
+///
+/// [`CreateRequest::output`] is chosen by Toss (§21), not by the backend:
+/// `hello/` becomes `hello.7z` beside it, and the backend is told that path
+/// rather than deriving one. Deciding it is what keeps §21's naming rule in
+/// one place instead of inside a library.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateRequest {
+    /// The directory whose contents go into the archive.
+    pub source: PathBuf,
+    /// The archive file to produce. Must not already exist (§22).
+    pub output: PathBuf,
+}
+
+/// What a creation did.
+///
+/// `bytes_written` is the size of the archive produced, so a caller can
+/// report what was gained rather than only what was put in — and so a
+/// future compression-ratio warning has a number to compare against (§18).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CreateResult {
+    pub entries: u64,
+    pub bytes_written: u64,
+    /// Members left out — symbolic links, sockets, FIFOs.
+    ///
+    /// Same honesty rule as [`ExtractResult::skipped`]: a count the caller
+    /// can report, because silently producing an archive with holes in it
+    /// would be the kind of omission §17 exists to prevent (§17).
+    pub skipped: u64,
+}
+
 /// What a backend can do, so routing can be decided by capability rather
 /// than by library identity (§7).
 #[derive(Debug, Clone, Copy)]

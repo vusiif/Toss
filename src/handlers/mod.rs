@@ -15,4 +15,36 @@
 //!
 //! Phases 4 through 7 fill this module.
 
+use std::path::Path;
+
+use crate::backend::archive::ArchiveError;
+use crate::core::error::TossError;
+
 pub mod archive;
+pub mod directory;
+
+/// Turn a backend failure into something Toss can report (§23).
+///
+/// Lives here rather than in either handler because both ask the archive
+/// backend for something, and the wording a user sees must not depend on
+/// which of the two asked. The path is added at this layer because it is the
+/// one that knows which input was being worked on; a backend deep inside
+/// extraction only knows what went wrong.
+pub(crate) fn translate(err: ArchiveError, path: &Path) -> TossError {
+    match err {
+        ArchiveError::UnsupportedFormat => TossError::UnsupportedFormat(path.to_path_buf()),
+        ArchiveError::CorruptArchive(context) => TossError::CorruptInput {
+            path: path.to_path_buf(),
+            context,
+        },
+        ArchiveError::OutputConflict(target) => TossError::OutputConflict(target),
+        ArchiveError::PermissionDenied(target) => TossError::PermissionDenied(target),
+        ArchiveError::UnsafePath(entry) => TossError::other(format!(
+            "archive entry would escape the output directory: {}",
+            entry.display()
+        )),
+        ArchiveError::BackendFailure(context) => {
+            TossError::other(format!("archive backend failed: {context}"))
+        }
+    }
+}

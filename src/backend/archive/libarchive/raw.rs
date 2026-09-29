@@ -25,7 +25,7 @@
 //!   become dangling as soon as it is freed; they must be copied before
 //!   cleanup, never stored.
 
-use std::os::raw::{c_char, c_int, c_void};
+use std::os::raw::{c_char, c_int, c_long, c_uint, c_void};
 
 /// Opaque libarchive reader. Never constructed in Rust; only ever obtained
 /// from [`archive_read_new`] and passed back by pointer.
@@ -162,6 +162,73 @@ unsafe extern "C" {
     /// Discard the remainder of the current entry so the next header call
     /// advances. Cheaper than reading data we only intend to count past.
     pub fn archive_read_data_skip(archive: *mut Archive) -> c_int;
+
+    // --- writing (§46: creation lives in the same abstraction as extraction) ---
+
+    /// Allocate a writer. Same lifetime contract as [`archive_read_new`]:
+    /// null or a handle only [`archive_write_free`] may take back.
+    pub fn archive_write_new() -> *mut Archive;
+
+    /// Select the container format before anything is opened. Must be called
+    /// prior to `archive_write_open_filename`, or libarchive refuses to write.
+    pub fn archive_write_set_format_7zip(archive: *mut Archive) -> c_int;
+
+    pub fn archive_write_open_filename(archive: *mut Archive, filename: *const c_char) -> c_int;
+
+    /// Wide-character form, Windows only — the same reason as
+    /// [`archive_read_open_filename_w`]: a destination Toss was handed may be
+    /// WTF-16 rather than UTF-8, and a pack that refused such a path would be
+    /// refusing work §22 says Toss must do (§22).
+    #[cfg(windows)]
+    pub fn archive_write_open_filename_w(archive: *mut Archive, filename: *const u16) -> c_int;
+
+    /// Write one member's header. The entry is borrowed: it stays owned by
+    /// whoever created it and is not retained by the writer.
+    pub fn archive_write_header(archive: *mut Archive, entry: *mut ArchiveEntry) -> c_int;
+
+    /// Returns `la_ssize_t`: bytes written, or a negative `ARCHIVE_*` code.
+    pub fn archive_write_data(archive: *mut Archive, buffer: *const c_void, length: usize)
+    -> isize;
+
+    pub fn archive_write_close(archive: *mut Archive) -> c_int;
+
+    /// Releases the writer; the header documents that it also implies a close.
+    pub fn archive_write_free(archive: *mut Archive) -> c_int;
+
+    /// Allocate an empty member description. Freed with
+    /// [`archive_entry_free`], independently of the writer.
+    pub fn archive_entry_new() -> *mut ArchiveEntry;
+    pub fn archive_entry_free(entry: *mut ArchiveEntry);
+
+    /// `name` is copied by libarchive, so the caller's buffer need not outlive
+    /// the call — but it must be NUL-terminated and contain no interior NUL.
+    ///
+    /// `name` is read as being in the current locale. On Windows that is the
+    /// ANSI code page and never UTF-8, so a UTF-8 name belongs in
+    /// `archive_entry_copy_pathname_w` instead.
+    pub fn archive_entry_set_pathname(entry: *mut ArchiveEntry, name: *const c_char);
+
+    /// Wide-character form, Windows only. `wchar_t` is 16 bits under MSVC,
+    /// hence `u16`.
+    ///
+    /// This is the one that has to be used on Windows: the 7z container stores
+    /// UTF-16, and libarchive builds it by converting the *multibyte* pathname
+    /// **from the current ANSI code page** — which is not UTF-8, so UTF-8 bytes
+    /// handed to [`archive_entry_set_pathname`] come out of the other end
+    /// mangled (§22). Giving it wide characters takes the conversion out of the
+    /// locale's hands entirely.
+    #[cfg(windows)]
+    pub fn archive_entry_copy_pathname_w(entry: *mut ArchiveEntry, name: *const u16);
+
+    pub fn archive_entry_set_size(entry: *mut ArchiveEntry, size: i64);
+    pub fn archive_entry_set_filetype(entry: *mut ArchiveEntry, filetype: c_uint);
+
+    /// `__LA_TIME_T` is `time_t` in libarchive 3.x. Every target Toss builds
+    /// for uses a 64-bit `time_t`, so `i64` matches each of them; the second
+    /// parameter is plain `long`, which `std::os::raw::c_long` already sizes
+    /// per platform — so this declaration needs no `cfg` where
+    /// `archive_entry_filetype` does (§31).
+    pub fn archive_entry_set_mtime(entry: *mut ArchiveEntry, mtime: i64, nanos: c_long);
 }
 
 /// Container formats Toss recognises (§6). Kept here because these are

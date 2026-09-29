@@ -1,25 +1,28 @@
 //! libarchive binding.
 //!
 //! Layering, bottom to top (§24, §32): [`raw`] holds the declarations,
-//! [`reader`] owns the handle and its lifetime, and [`LibarchiveBackend`]
-//! turns those into the operations [`super::ArchiveBackend`] promises.
-//! Nothing above this module sees a `*mut Archive` or an `ARCHIVE_OK` (§4).
+//! [`reader`] and [`writer`] own their handles and lifetimes, and
+//! [`LibarchiveBackend`] turns those into the operations
+//! [`super::ArchiveBackend`] promises. Nothing above this module sees a
+//! `*mut Archive` or an `ARCHIVE_OK` (§4).
 
 pub mod raw;
 pub mod reader;
+pub mod writer;
 
 use super::ArchiveBackend;
 use super::types::{
     ArchiveCapabilities, ArchiveEntry, ArchiveError, ArchiveFormat, ArchiveInput, ArchiveProbe,
-    ExtractRequest, ExtractResult,
+    CreateRequest, CreateResult, ExtractRequest, ExtractResult,
 };
 use reader::Reader;
+use writer::Writer;
 
 /// The libarchive implementation of [`ArchiveBackend`].
 ///
 /// A unit struct on purpose: it holds no state, because every operation owns
-/// its own reader from creation to release. Registering it is the single
-/// `cfg(feature = "archive")` in the archive domain (§12).
+/// its own reader or writer from creation to release. Registering it is the
+/// single `cfg(feature = "archive")` in the archive domain (§12).
 #[derive(Debug, Default, Clone, Copy)]
 pub struct LibarchiveBackend;
 
@@ -33,9 +36,9 @@ impl ArchiveBackend for LibarchiveBackend {
                 ArchiveFormat::SevenZip,
                 ArchiveFormat::Rar,
             ],
-            // `create` does not exist yet, so nothing claims to write. Phase 5
-            // adds it to this same trait rather than a second one (§46).
-            write: &[],
+            // §18.2's default is 7z. Creation and extraction share this trait
+            // by design (§46), so the write capability lives here too.
+            write: &[ArchiveFormat::SevenZip],
         }
     }
 
@@ -49,6 +52,28 @@ impl ArchiveBackend for LibarchiveBackend {
 
     fn extract(&self, request: &ExtractRequest) -> Result<ExtractResult, ArchiveError> {
         Reader::extract(request)
+    }
+
+    fn create(&self, request: &CreateRequest) -> Result<CreateResult, ArchiveError> {
+        let mut writer = Writer::seven_zip(request.output.clone())?;
+
+        // The walk happens here rather than in the handler: the members have
+        // to be streamed into this writer as they are discovered, and splitting
+        // discovery from writing would mean passing an open file list through
+        // the domain types for no gain while there is one backend (§46, §42).
+        let (entries, skipped) = writer.add_tree(&request.source)?;
+
+        writer.finish()?;
+
+        let bytes_written = std::fs::metadata(&request.output)
+            .map(|meta| meta.len())
+            .unwrap_or(0);
+
+        Ok(CreateResult {
+            entries,
+            bytes_written,
+            skipped,
+        })
     }
 }
 

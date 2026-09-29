@@ -29,5 +29,9 @@ fn main() -> std::process::ExitCode {
 /// for the human and an exit code for the script; nothing here panics on
 /// input the user chose (§23, §24).
 fn run() -> Result<(), TossError> {
+    // Before anything reads or writes an archive: member names travel through
+    // the C locale, and Rust leaves that uninitialised (§22).
+    platform::prepare();
+
     dispatch::run(cli::parse(std::env::args_os().skip(1))?)
 }

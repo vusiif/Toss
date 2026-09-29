@@ -4,12 +4,12 @@
 //! the caller gave us, classify each one, then hand it to whichever handler
 //! claims it.
 //!
-//! No handler is registered yet — archives, media and images arrive in later
-//! phases — so every automatic input currently falls through to the info
-//! fallback. That is the whole point of the fallback: `toss <anything>` must
-//! stay useful rather than answer "unsupported file" (§7). The report says
-//! what the input is; the error line says which default action could not be
-//! performed, so nothing is claimed that did not happen (§5, §24).
+//! Archives and directories are routed to their handlers; images, media and
+//! anything unclassified fall through to the info fallback, and that fallback
+//! is the point: `toss <anything>` must stay useful rather than answer
+//! "unsupported file" (§7). The report says what the input is; the error line
+//! says which default action could not be performed, so nothing is claimed
+//! that did not happen (§5, §24).
 
 use std::path::PathBuf;
 
@@ -65,14 +65,19 @@ fn resolve_inputs(paths: &[PathBuf]) -> Result<Vec<Input>, TossError> {
 
 /// Hand a classified input to the handler that claims it.
 ///
-/// This is the seam a handler registry plugs into once the first real handler
-/// lands (Phase 4). Until then automatic mode reports what the input is, and
-/// states plainly which action it could not perform.
+/// This is the seam a handler registry would plug into if the handlers ever
+/// stopped being plain functions (§42). Automatic mode routes on what the
+/// classifier decided; explicit mode routes on the verb the caller typed, and
+/// the handler decides whether the input can actually be worked on (§4.2).
 fn route(verb: Option<Verb>, input: &Input, kind: Kind) -> Result<(), TossError> {
     match verb {
         // `toss extract archive.7z` — the verb states the action outright
         // (§4.2), so it goes straight to the handler that performs it.
         Some(Verb::Extract) => crate::handlers::archive::extract(input.path()),
+
+        // `toss pack folder/` — same, and the handler is the one that says
+        // whether the input is something a directory packer can use (§4.2).
+        Some(Verb::Pack) => crate::handlers::directory::compress(input.path()),
 
         // The remaining verbs have no handler yet, so naming one is still
         // the most useful reply (§4.2).
@@ -82,6 +87,9 @@ fn route(verb: Option<Verb>, input: &Input, kind: Kind) -> Result<(), TossError>
             // `toss archive.7z` — the classifier already decided what this
             // is (§6), and dispatch exists to hand that decision onward (§9).
             Kind::Archive => crate::handlers::archive::extract(input.path()),
+
+            // `toss folder/` — §18.2's default action for a directory.
+            Kind::Directory => crate::handlers::directory::compress(input.path()),
 
             // Everything else still has no handler: describe the input, then
             // say which default action is missing (§7, §5).
@@ -119,6 +127,30 @@ mod tests {
         run(parse(list.iter().map(OsString::from))?)
     }
 
+    /// A scratch directory that cleans itself up, so a failing test does not
+    /// leave output behind for the next run to trip over.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(name: &str) -> Self {
+            let path =
+                std::env::temp_dir().join(format!("toss-dispatch-{}-{name}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir_all(&path).expect("scratch directory");
+            Self(path)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
     #[test]
     fn help_succeeds_and_writes_nothing_to_stderr() {
         run(Command::Help).expect("help is not a failure");
@@ -127,15 +159,43 @@ mod tests {
     #[test]
     fn an_existing_input_is_resolved_before_it_is_routed() {
         // A directory has a defined default action (§5), so routing reaches
-        // the refusal rather than stopping at resolution. The missing-input
-        // case is covered separately below.
-        let err = run(Command::Automatic {
-            paths: vec![manifest("src")],
-        })
-        .expect_err("directory compression has no handler yet");
+        // the handler rather than stopping at resolution — and the refusal
+        // below is raised *by that handler*, which is what proves both halves
+        // ran. The conflict is decided before any backend is consulted, so
+        // this holds whether or not this build compiled one in (§27).
+        let scratch = Scratch::new("resolved");
+        let source = scratch.path().join("box");
+        std::fs::create_dir_all(&source).expect("source directory");
+        std::fs::write(scratch.path().join("box.7z"), b"already here").expect("placeholder");
 
-        assert_eq!(err.exit_code(), ExitCode::UnsupportedFormat);
-        assert!(err.to_string().contains("directory compression"));
+        let err = run(Command::Automatic {
+            paths: vec![source],
+        })
+        .expect_err("the output name is taken");
+
+        assert_eq!(err.exit_code(), ExitCode::Failure);
+        assert!(
+            err.to_string().contains("output already exists"),
+            "expected the conflict to be named, got: {err}"
+        );
+    }
+
+    #[test]
+    fn the_pack_verb_reaches_the_directory_handler() {
+        // The verb is routed before the classifier's verdict matters, so a
+        // file handed to `pack` has to be refused by the handler itself —
+        // which is only possible if dispatch actually got that far (§4.2).
+        let err = run(Command::Explicit {
+            verb: Verb::Pack,
+            args: vec![manifest("Cargo.toml")],
+        })
+        .expect_err("a file cannot be packed");
+
+        assert_eq!(err.exit_code(), ExitCode::InvalidArguments);
+        assert!(
+            err.to_string().contains("is not a directory"),
+            "expected the handler's own complaint, got: {err}"
+        );
     }
 
     #[test]
@@ -209,10 +269,9 @@ mod tests {
     fn a_kind_with_a_default_action_states_the_action_it_could_not_perform() {
         let path = manifest("Cargo.toml");
 
-        // `Kind::Archive` is absent on purpose: step 7 wired it to the
-        // extraction handler, so it no longer reports a missing action.
+        // `Kind::Archive` and `Kind::Directory` are absent on purpose: both
+        // are wired to handlers now, so neither reports a missing action.
         let cases = [
-            (Kind::Directory, "directory compression"),
             (Kind::Image, "image viewing"),
             (Kind::Media, "media playback"),
         ];

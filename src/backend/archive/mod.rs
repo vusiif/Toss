@@ -23,7 +23,7 @@ pub mod libarchive;
 
 pub use types::{
     ArchiveCapabilities, ArchiveEntry, ArchiveError, ArchiveFormat, ArchiveInput, ArchiveProbe,
-    ExtractRequest, ExtractResult,
+    CreateRequest, CreateResult, ExtractRequest, ExtractResult,
 };
 
 /// What an archive backend can do, expressed as operations.
@@ -42,6 +42,14 @@ pub trait ArchiveBackend {
 
     /// Extract into a destination Toss has already chosen and validated.
     fn extract(&self, request: &ExtractRequest) -> Result<ExtractResult, ArchiveError>;
+
+    /// Compress a directory into an archive Toss has already named.
+    ///
+    /// Deliberately the same trait as `extract` rather than a separate
+    /// "compression backend": creation and extraction are two operations on
+    /// one domain, and splitting them would give Toss two abstractions to
+    /// keep in step for no gain (§46).
+    fn create(&self, request: &CreateRequest) -> Result<CreateResult, ArchiveError>;
 }
 
 /// Chooses a backend by capability rather than by name (§7, §43).
@@ -118,6 +126,11 @@ impl ArchiveRouter {
 /// `archive` feature gets an empty router, which reads as "no backend" rather
 /// than as a failure (§42).
 pub fn router() -> ArchiveRouter {
+    // The binding only has to be mutable when there is a backend to register
+    // into it. A build without the `archive` feature has nothing to add, so
+    // the same line would otherwise be a lint failure — and §37 asks for plain
+    // `cargo clippy`, not only the `--all-features` run CI performs.
+    #[cfg_attr(not(feature = "archive"), allow(unused_mut))]
     let mut router = ArchiveRouter::empty();
 
     #[cfg(feature = "archive")]
@@ -173,6 +186,10 @@ mod tests {
         }
 
         fn extract(&self, _request: &ExtractRequest) -> Result<ExtractResult, ArchiveError> {
+            Err(ArchiveError::UnsupportedFormat)
+        }
+
+        fn create(&self, _request: &CreateRequest) -> Result<CreateResult, ArchiveError> {
             Err(ArchiveError::UnsupportedFormat)
         }
     }

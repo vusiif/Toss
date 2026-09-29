@@ -7,7 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::backend::archive::{self, ArchiveError, ArchiveFormat, ArchiveInput, ExtractRequest};
+use crate::backend::archive::{self, ArchiveFormat, ArchiveInput, ExtractRequest};
 use crate::core::error::TossError;
 use crate::core::log;
 
@@ -43,7 +43,7 @@ pub fn extract(archive: &Path) -> Result<(), TossError> {
 
     let result = backend
         .extract(&request)
-        .map_err(|err| translate(err, archive))?;
+        .map_err(|err| super::translate(err, archive))?;
 
     log::out(&format!(
         "Extracted {} entries to {}",
@@ -87,30 +87,6 @@ fn output_root(archive: &Path) -> PathBuf {
     }
 
     archive.with_file_name(format!("{}-extracted", file_name.to_string_lossy()))
-}
-
-/// Turn a backend failure into something Toss can report (§23).
-///
-/// The archive's path is added here because this layer is the one that knows
-/// which file was being worked on; a backend deep inside extraction only
-/// knows what went wrong.
-fn translate(err: ArchiveError, archive: &Path) -> TossError {
-    match err {
-        ArchiveError::UnsupportedFormat => TossError::UnsupportedFormat(archive.to_path_buf()),
-        ArchiveError::CorruptArchive(context) => TossError::CorruptInput {
-            path: archive.to_path_buf(),
-            context,
-        },
-        ArchiveError::OutputConflict(path) => TossError::OutputConflict(path),
-        ArchiveError::PermissionDenied(path) => TossError::PermissionDenied(path),
-        ArchiveError::UnsafePath(entry) => TossError::other(format!(
-            "archive entry would escape the output directory: {}",
-            entry.display()
-        )),
-        ArchiveError::BackendFailure(context) => {
-            TossError::other(format!("archive backend failed: {context}"))
-        }
-    }
 }
 
 #[cfg(test)]
