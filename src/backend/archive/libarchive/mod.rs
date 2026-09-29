@@ -10,6 +10,7 @@
 //! [`raw`] (§4, §24).
 
 pub mod raw;
+pub mod reader;
 
 #[cfg(test)]
 mod tests {

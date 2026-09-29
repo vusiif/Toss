@@ -87,6 +87,19 @@ unsafe extern "C" {
         block_size: usize,
     ) -> c_int;
 
+    /// Wide-character form, Windows only.
+    ///
+    /// A Windows path need not be valid UTF-8 — it is WTF-16 — so widening it
+    /// and calling this is the only way to open every path the OS accepts.
+    /// Going through `to_str()` instead would reject paths Toss was asked to
+    /// handle (§22). `wchar_t` is 16 bits under MSVC, hence `u16`.
+    #[cfg(windows)]
+    pub fn archive_read_open_filename_w(
+        archive: *mut Archive,
+        filename: *const u16,
+        block_size: usize,
+    ) -> c_int;
+
     /// Advance to the next member, filling `entry`. Returns [`ARCHIVE_EOF`]
     /// when there is nothing left. `entry` is borrowed from `archive`.
     pub fn archive_read_next_header(archive: *mut Archive, entry: *mut *mut ArchiveEntry) -> c_int;
