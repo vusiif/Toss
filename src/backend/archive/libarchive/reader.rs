@@ -1015,4 +1015,82 @@ mod tests {
             "a file escaped the output root"
         );
     }
+
+    fn corpus_files(folder: &str) -> Vec<PathBuf> {
+        let directory = corpus(folder);
+        let mut files: Vec<PathBuf> = std::fs::read_dir(&directory)
+            .unwrap_or_else(|err| panic!("{}: {err}", directory.display()))
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.is_file())
+            .collect();
+
+        files.sort();
+        files
+    }
+
+    /// §45 step 9: every committed sample must produce a defined outcome, and
+    /// none of them may panic.
+    ///
+    /// Sweeping the directories rather than naming files is the point: a
+    /// sample added later is covered without anyone remembering to write a
+    /// test for it (§29).
+    #[test]
+    fn the_whole_corpus_yields_a_defined_outcome() {
+        let _serial = exclusive();
+        let mut checked = 0_usize;
+
+        // Anything Toss claims to read must be identified as something other
+        // than "unknown", and must list at least one member.
+        for folder in ["valid", "unicode"] {
+            for path in corpus_files(folder) {
+                let name = path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+
+                let probe = Reader::probe(&path)
+                    .unwrap_or_else(|err| panic!("{folder}/{name} failed to probe: {err}"));
+                assert_ne!(
+                    probe.format,
+                    ArchiveFormat::Unknown,
+                    "{folder}/{name} was not identified"
+                );
+
+                let entries = Reader::list(&path)
+                    .unwrap_or_else(|err| panic!("{folder}/{name} failed to list: {err}"));
+                assert!(!entries.is_empty(), "{folder}/{name} listed nothing");
+
+                checked += 1;
+            }
+        }
+
+        // Deliberately damaged samples must be refused, not accepted and not
+        // crashed on: refusing is what lets routing tell "corrupt" from
+        // "unsupported" (§42).
+        //
+        // Asserted against `list` rather than `probe`, because probing only
+        // reads the first header — a truncated archive can still identify
+        // itself as a zip and only fails once the walk reaches the damage.
+        // `malformed.zip` does exactly that, which is how this distinction
+        // was found.
+        for path in corpus_files("corrupt") {
+            let name = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
+
+            let outcome = Reader::list(&path);
+            assert!(outcome.is_err(), "corrupt/{name} was listed: {outcome:?}");
+
+            checked += 1;
+        }
+
+        // Guards the sweep itself: an empty directory would otherwise pass
+        // every assertion above by asserting nothing.
+        assert!(
+            checked >= 8,
+            "expected the whole corpus to run, only checked {checked}"
+        );
+    }
 }
