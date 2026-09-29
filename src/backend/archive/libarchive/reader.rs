@@ -808,7 +808,7 @@ mod tests {
 
     // ---- §45 step 6: safe extraction ----
 
-    use crate::backend::archive::{ArchiveInput, ExtractRequest};
+    use crate::backend::archive::{ArchiveError, ArchiveInput, ExtractRequest, ExtractResult};
 
     /// A scratch directory that cleans itself up, so a failing test does not
     /// leave extraction output behind for the next run to trip over.
@@ -1029,6 +1029,40 @@ mod tests {
         files
     }
 
+    /// The file name a sample is reported under, so a failure names one
+    /// rather than a whole temporary path.
+    fn sample_name(path: &Path) -> String {
+        path.file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    }
+
+    /// Extract one sample into `case/out`, creating the output root first.
+    ///
+    /// The root is created up front because that is what the handler does —
+    /// an archive with no restorable members still has to leave the promised
+    /// directory behind (§5) — and because a sample whose only entry is
+    /// refused never reaches a `create_dir_all` of its own.
+    fn extract_into(case: &Path, archive: &Path) -> Result<ExtractResult, ArchiveError> {
+        let output_root = case.join("out");
+        std::fs::create_dir_all(&output_root).expect("output root");
+
+        Reader::extract(&ExtractRequest {
+            input: ArchiveInput::single(archive.to_path_buf()),
+            output_root,
+        })
+    }
+
+    /// What landed beside `case/out` when nothing was supposed to.
+    fn beside_output_root(case: &Path) -> Vec<PathBuf> {
+        std::fs::read_dir(case)
+            .unwrap_or_else(|err| panic!("{}: {err}", case.display()))
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.file_name() != Some(std::ffi::OsStr::new("out")))
+            .collect()
+    }
+
     /// §45 step 9: every committed sample must produce a defined outcome, and
     /// none of them may panic.
     ///
@@ -1044,10 +1078,7 @@ mod tests {
         // than "unknown", and must list at least one member.
         for folder in ["valid", "unicode"] {
             for path in corpus_files(folder) {
-                let name = path
-                    .file_name()
-                    .map(|name| name.to_string_lossy().into_owned())
-                    .unwrap_or_default();
+                let name = sample_name(&path);
 
                 let probe = Reader::probe(&path)
                     .unwrap_or_else(|err| panic!("{folder}/{name} failed to probe: {err}"));
@@ -1065,31 +1096,99 @@ mod tests {
             }
         }
 
-        // Deliberately damaged samples must be refused, not accepted and not
-        // crashed on: refusing is what lets routing tell "corrupt" from
-        // "unsupported" (§42).
+        // §29's `edge/` folder holds shapes a reader has to survive that are
+        // not unusual enough to deserve a test each: an archive with nothing
+        // in it, a member of zero bytes, spaces, eight levels of nesting, and
+        // one name recorded twice.
         //
-        // Asserted against `list` rather than `probe`, because probing only
-        // reads the first header — a truncated archive can still identify
-        // itself as a zip and only fails once the walk reaches the damage.
-        // `malformed.zip` does exactly that, which is how this distinction
-        // was found.
-        for path in corpus_files("corrupt") {
-            let name = path
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_default();
+        // The rule is weaker than valid/'s on purpose. `empty.zip` is correct
+        // while listing nothing, and insisting on a member would reject the
+        // very sample it exists to cover.
+        for path in corpus_files("edge") {
+            let name = sample_name(&path);
 
-            let outcome = Reader::list(&path);
-            assert!(outcome.is_err(), "corrupt/{name} was listed: {outcome:?}");
+            let probe = Reader::probe(&path)
+                .unwrap_or_else(|err| panic!("edge/{name} failed to probe: {err}"));
+            assert_ne!(
+                probe.format,
+                ArchiveFormat::Unknown,
+                "edge/{name} was not identified"
+            );
+
+            Reader::list(&path).unwrap_or_else(|err| panic!("edge/{name} failed to list: {err}"));
 
             checked += 1;
         }
 
-        // Guards the sweep itself: an empty directory would otherwise pass
-        // every assertion above by asserting nothing.
+        // Deliberately damaged samples must be refused, not accepted and not
+        // crashed on: refusing is what lets routing tell "corrupt" from
+        // "unsupported" (§42).
+        //
+        // Asserted against extraction rather than `probe` or `list`, because
+        // the two damage patterns reach Toss at different depths.
+        // `malformed.zip` still identifies itself as a zip and only breaks once
+        // the walk reaches the damage — which is how the probe/list distinction
+        // was found in the first place. `corrupt-member.zip` gets further still:
+        // its structure is intact, so listing it succeeds, and the mismatch
+        // only appears when the bytes are read. Full consumption is the one
+        // rule both fail.
+        let corrupt = Scratch::new("corrupt-sweep");
+        for path in corpus_files("corrupt") {
+            let name = sample_name(&path);
+            let outcome = extract_into(&corrupt.path().join(&name), &path);
+
+            assert!(
+                outcome.is_err(),
+                "corrupt/{name} extracted as though it were sound: {outcome:?}"
+            );
+
+            checked += 1;
+        }
+
+        // §52: a hostile sample needs two things asserted, not one. The
+        // outcome has to be defined, *and* the filesystem outside the output
+        // root has to be untouched — an archive that "succeeded" by writing
+        // through `../` would satisfy a check on the return value alone.
+        let security = Scratch::new("security-sweep");
+        for path in corpus_files("security") {
+            let name = sample_name(&path);
+            let case = security.path().join(&name);
+
+            match extract_into(&case, &path) {
+                // Well formed and restorable — the symlink case: the link is
+                // counted rather than created (§17).
+                Ok(_) => {}
+                // Refused before anything was written, which is the whole
+                // point of Toss owning this policy (§16, §28).
+                Err(ArchiveError::UnsafePath(_)) => {}
+                Err(err) => panic!("security/{name} failed in an unexpected way: {err:?}"),
+            }
+
+            let escaped = beside_output_root(&case);
+            assert!(
+                escaped.is_empty(),
+                "security/{name} wrote outside the output root: {:?}",
+                escaped
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+            );
+
+            checked += 1;
+        }
+
+        // The absolute-path sample names a location outside any root the scan
+        // above could see, so it is checked where it would have landed.
         assert!(
-            checked >= 8,
+            !Path::new("/toss-corpus-absolute-should-not-exist").exists(),
+            "an absolute member escaped to the filesystem root"
+        );
+
+        // Guards the sweep itself: an empty directory would otherwise pass
+        // every assertion above by asserting nothing. The floor is the number
+        // of samples committed today, so a deleted fixture is noticed too.
+        assert!(
+            checked >= 19,
             "expected the whole corpus to run, only checked {checked}"
         );
     }
