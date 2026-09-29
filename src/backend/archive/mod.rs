@@ -12,6 +12,7 @@
 //! arrives with Phase 5 (§46), which reuses this same abstraction rather
 //! than inventing a second one.
 
+pub mod policy;
 pub mod types;
 
 /// The native binding, present only when the `archive` feature is on (§14,

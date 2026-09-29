@@ -116,11 +116,18 @@ pub struct ExtractRequest {
 /// What an extraction did.
 ///
 /// Kept observable so archive-bomb limits can be enforced later without
-/// redesigning the API (§18).
+/// redesigning the API (§18), and so a caller can say how many members were
+/// left alone rather than leaving them out silently (§17).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExtractResult {
     pub entries: u64,
     pub bytes_written: u64,
+    /// Members Toss refused to write — links, devices, FIFOs.
+    ///
+    /// A count rather than a list because the refusal is uniform and the
+    /// caller reports a total; the individual names are available by listing
+    /// the archive first.
+    pub skipped: u64,
 }
 
 /// What a backend can do, so routing can be decided by capability rather

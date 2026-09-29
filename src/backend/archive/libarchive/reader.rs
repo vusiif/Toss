@@ -11,6 +11,8 @@
 //! the reader, because releasing is tied to the value leaving scope rather
 //! than to a code path (§31).
 
+use std::io::Write;
+use std::path::Path;
 use std::ptr::NonNull;
 
 #[cfg(test)]
@@ -266,6 +268,147 @@ impl Reader {
         } else {
             detail
         })
+    }
+
+    /// Extract `request` into its output root (§45 step 6).
+    ///
+    /// Every destination passes through [`crate::backend::archive::policy`]
+    /// before a single syscall touches the filesystem, so a hostile member is
+    /// refused while it is still just a string (§16, §28).
+    ///
+    /// Members that are neither files nor directories — symbolic links,
+    /// hard links, devices, FIFOs — are counted as skipped rather than
+    /// restored (§17). Creating a link lets a later member write through it
+    /// to somewhere the policy already rejected, so the conservative answer
+    /// for an early version is not to create any.
+    pub fn extract(
+        request: &crate::backend::archive::types::ExtractRequest,
+    ) -> Result<crate::backend::archive::types::ExtractResult, ArchiveError> {
+        let mut reader = Self::new()?;
+        reader.register(ArchiveFormat::Unknown);
+        reader.open(request.input.primary())?;
+
+        let mut result = crate::backend::archive::types::ExtractResult {
+            entries: 0,
+            bytes_written: 0,
+            skipped: 0,
+        };
+        let mut entry = std::ptr::null_mut();
+
+        loop {
+            // SAFETY: `reader.inner` is live; `entry` is an out-parameter
+            // owned by the reader and only borrowed until the next call.
+            let code = unsafe { raw::archive_read_next_header(reader.inner.as_ptr(), &mut entry) };
+            if code == raw::ARCHIVE_EOF {
+                break;
+            }
+            if code < 0 {
+                return Err(reader.read_failure(code, "extract"));
+            }
+
+            let info = reader.describe_entry(entry);
+            let destination =
+                crate::backend::archive::policy::destination(&request.output_root, &info.path)?;
+
+            // SAFETY: `entry` is still the one handed out a moment ago.
+            let kind = unsafe { raw::archive_entry_filetype(entry) } & raw::AE_IFMT;
+
+            if kind == raw::AE_IFDIR {
+                reader.make_dir(&destination)?;
+                reader.skip_member()?;
+            } else if kind == raw::AE_IFREG {
+                result.bytes_written += reader.write_member(&destination)?;
+            } else {
+                reader.skip_member()?;
+                result.skipped += 1;
+                continue;
+            }
+
+            result.entries += 1;
+        }
+
+        Ok(result)
+    }
+
+    /// Advance past the current member without reading it.
+    fn skip_member(&self) -> Result<(), ArchiveError> {
+        // SAFETY: `self.inner` is live for the duration of the call.
+        let code = unsafe { raw::archive_read_data_skip(self.inner.as_ptr()) };
+        if code < 0 {
+            return Err(self.read_failure(code, "extract"));
+        }
+        Ok(())
+    }
+
+    fn make_dir(&self, path: &Path) -> Result<(), ArchiveError> {
+        std::fs::create_dir_all(path).map_err(|err| self.io_failure(path, err))
+    }
+
+    /// Write one regular member, returning the bytes it produced.
+    fn write_member(&self, destination: &Path) -> Result<u64, ArchiveError> {
+        if let Some(parent) = destination.parent() {
+            self.make_dir(parent)?;
+        }
+
+        // `create_new` rather than an `exists()` check: an existing file is a
+        // conflict (§22), and checking first would leave a gap between the
+        // check and the write.
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(destination)
+            .map_err(|err| {
+                if err.kind() == std::io::ErrorKind::AlreadyExists {
+                    ArchiveError::OutputConflict(destination.to_path_buf())
+                } else {
+                    self.io_failure(destination, err)
+                }
+            })?;
+
+        let mut buffer = vec![0_u8; 64 * 1024];
+        let mut written = 0_u64;
+
+        loop {
+            // SAFETY: `self.inner` is live, and `buffer` is valid for
+            // `buffer.len()` bytes and outlives the call.
+            let read = unsafe {
+                raw::archive_read_data(
+                    self.inner.as_ptr(),
+                    buffer.as_mut_ptr().cast(),
+                    buffer.len(),
+                )
+            };
+
+            if read < 0 {
+                // On failure libarchive returns one of its small ARCHIVE_*
+                // codes here rather than a byte count, so narrowing to c_int
+                // cannot lose anything.
+                return Err(self.read_failure(read as std::os::raw::c_int, "extract"));
+            }
+            if read == 0 {
+                break;
+            }
+
+            let count = read as usize;
+            file.write_all(&buffer[..count])
+                .map_err(|err| self.io_failure(destination, err))?;
+            written += read as u64;
+        }
+
+        Ok(written)
+    }
+
+    /// Turn an `std::io::Error` into something Toss can report (§23).
+    ///
+    /// Permission problems get their own exit code because that is the one a
+    /// user can actually act on (§24).
+    fn io_failure(&self, path: &Path, err: std::io::Error) -> ArchiveError {
+        match err.kind() {
+            std::io::ErrorKind::PermissionDenied => {
+                ArchiveError::PermissionDenied(path.to_path_buf())
+            }
+            _ => ArchiveError::BackendFailure(format!("{}: {err}", path.display())),
+        }
     }
 }
 
@@ -660,6 +803,216 @@ mod tests {
                 crate::backend::archive::ArchiveError::UnsupportedFormat
             ),
             "got {err:?}"
+        );
+    }
+
+    // ---- §45 step 6: safe extraction ----
+
+    use crate::backend::archive::{ArchiveInput, ExtractRequest};
+
+    /// A scratch directory that cleans itself up, so a failing test does not
+    /// leave extraction output behind for the next run to trip over.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(name: &str) -> Self {
+            let path =
+                std::env::temp_dir().join(format!("toss-extract-{}-{name}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir_all(&path).expect("scratch directory");
+            Self(path)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn request(archive: &str, output_root: &Path) -> ExtractRequest {
+        ExtractRequest {
+            input: ArchiveInput::single(corpus(archive)),
+            output_root: output_root.to_path_buf(),
+        }
+    }
+
+    /// Build a stored (uncompressed) ZIP whose members are all empty.
+    ///
+    /// Empty members keep the CRC at zero, which is correct rather than
+    /// approximate, so no checksum code is needed to make a hostile archive
+    /// that libarchive will accept. The point is to control the *names*:
+    /// §29 asks for a traversal regression, and the only honest way to test
+    /// one is to attack with a real archive.
+    fn stored_zip(names: &[&str]) -> Vec<u8> {
+        let mut local = Vec::new();
+        let mut central = Vec::new();
+
+        for name in names {
+            let offset = local.len() as u32;
+            let bytes = name.as_bytes();
+
+            local.extend_from_slice(&0x04034b50_u32.to_le_bytes());
+            local.extend_from_slice(&20_u16.to_le_bytes()); // version needed
+            local.extend_from_slice(&0_u16.to_le_bytes()); // flags
+            local.extend_from_slice(&0_u16.to_le_bytes()); // method: stored
+            local.extend_from_slice(&0_u16.to_le_bytes()); // time
+            local.extend_from_slice(&0_u16.to_le_bytes()); // date
+            local.extend_from_slice(&0_u32.to_le_bytes()); // crc32 of empty = 0
+            local.extend_from_slice(&0_u32.to_le_bytes()); // compressed
+            local.extend_from_slice(&0_u32.to_le_bytes()); // uncompressed
+            local.extend_from_slice(&(bytes.len() as u16).to_le_bytes());
+            local.extend_from_slice(&0_u16.to_le_bytes()); // extra length
+            local.extend_from_slice(bytes);
+
+            central.extend_from_slice(&0x02014b50_u32.to_le_bytes());
+            central.extend_from_slice(&20_u16.to_le_bytes()); // version made by
+            central.extend_from_slice(&20_u16.to_le_bytes()); // version needed
+            central.extend_from_slice(&0_u16.to_le_bytes()); // flags
+            central.extend_from_slice(&0_u16.to_le_bytes()); // method
+            central.extend_from_slice(&0_u16.to_le_bytes()); // time
+            central.extend_from_slice(&0_u16.to_le_bytes()); // date
+            central.extend_from_slice(&0_u32.to_le_bytes()); // crc32
+            central.extend_from_slice(&0_u32.to_le_bytes()); // compressed
+            central.extend_from_slice(&0_u32.to_le_bytes()); // uncompressed
+            central.extend_from_slice(&(bytes.len() as u16).to_le_bytes());
+            central.extend_from_slice(&0_u16.to_le_bytes()); // extra
+            central.extend_from_slice(&0_u16.to_le_bytes()); // comment
+            central.extend_from_slice(&0_u16.to_le_bytes()); // disk
+            central.extend_from_slice(&0_u16.to_le_bytes()); // internal attrs
+            central.extend_from_slice(&0_u32.to_le_bytes()); // external attrs
+            central.extend_from_slice(&offset.to_le_bytes());
+            central.extend_from_slice(bytes);
+        }
+
+        let mut zip = local;
+        let central_offset = zip.len() as u32;
+        zip.extend_from_slice(&central);
+        let central_size = central.len() as u32;
+
+        zip.extend_from_slice(&0x06054b50_u32.to_le_bytes());
+        zip.extend_from_slice(&0_u16.to_le_bytes()); // disk number
+        zip.extend_from_slice(&0_u16.to_le_bytes()); // central directory disk
+        zip.extend_from_slice(&(names.len() as u16).to_le_bytes());
+        zip.extend_from_slice(&(names.len() as u16).to_le_bytes());
+        zip.extend_from_slice(&central_size.to_le_bytes());
+        zip.extend_from_slice(&central_offset.to_le_bytes());
+        zip.extend_from_slice(&0_u16.to_le_bytes()); // comment length
+
+        zip
+    }
+
+    #[test]
+    fn extraction_writes_every_member_the_archive_advertised() {
+        let _serial = exclusive();
+        let scratch = Scratch::new("round-trip");
+
+        let listed = Reader::list(&corpus("valid/simple.zip")).expect("lists");
+        assert!(!listed.is_empty());
+
+        let result = Reader::extract(&request("valid/simple.zip", scratch.path()))
+            .expect("a valid archive extracts");
+
+        assert_eq!(result.entries as usize, listed.len());
+        assert!(result.bytes_written > 0, "nothing was written");
+
+        for entry in &listed {
+            let written = scratch.path().join(&entry.path);
+            if entry.is_dir {
+                assert!(written.is_dir(), "{} was not created", entry.path.display());
+            } else {
+                let size = std::fs::metadata(&written)
+                    .unwrap_or_else(|err| panic!("{}: {err}", entry.path.display()))
+                    .len();
+                assert_eq!(
+                    Some(size),
+                    entry.size,
+                    "{} was written with the wrong size",
+                    entry.path.display()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn extracting_again_refuses_to_overwrite_what_is_already_there() {
+        let _serial = exclusive();
+        let scratch = Scratch::new("conflict");
+
+        Reader::extract(&request("valid/simple.zip", scratch.path()))
+            .expect("the first extraction succeeds");
+
+        // §22/§27: a second pass must not quietly replace files the user
+        // might have edited between the two.
+        let err = Reader::extract(&request("valid/simple.zip", scratch.path()))
+            .expect_err("the destination is already populated");
+
+        assert!(
+            matches!(
+                err,
+                crate::backend::archive::ArchiveError::OutputConflict(_)
+            ),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn links_are_counted_rather_than_restored() {
+        let _serial = exclusive();
+        let scratch = Scratch::new("symlink");
+
+        let result = Reader::extract(&request("security/symlink.zip", scratch.path()))
+            .expect("the archive itself is well formed");
+
+        // §17: creating a link lets a later member write through it to a
+        // path the policy already rejected, so early Toss does not create
+        // any. The refusal is counted so the caller can report it.
+        assert!(
+            result.skipped > 0,
+            "expected the symbolic link member to be skipped"
+        );
+
+        let restored = Reader::list(&corpus("security/symlink.zip")).expect("lists");
+        let links = restored
+            .iter()
+            .filter(|entry| scratch.path().join(&entry.path).symlink_metadata().is_ok())
+            .count();
+        assert!(
+            links <= result.entries as usize,
+            "more members were written than were counted"
+        );
+    }
+
+    #[test]
+    fn a_member_that_climbs_out_of_the_output_root_never_reaches_the_filesystem() {
+        let _serial = exclusive();
+        let scratch = Scratch::new("zip-slip");
+
+        let hostile = stored_zip(&["../../toss-zip-slip-should-not-exist"]);
+        let archive_path = scratch.path().join("hostile.zip");
+        std::fs::write(&archive_path, &hostile).expect("temp archive written");
+
+        let request = ExtractRequest {
+            input: ArchiveInput::single(archive_path),
+            output_root: scratch.path().join("root"),
+        };
+        std::fs::create_dir_all(&request.output_root).expect("output root");
+
+        let err = Reader::extract(&request).expect_err("the entry must be refused");
+        assert!(
+            matches!(err, crate::backend::archive::ArchiveError::UnsafePath(_)),
+            "got {err:?}"
+        );
+
+        // The whole point: nothing may appear outside the output root.
+        let escaped = scratch.path().parent().expect("temp dir has a parent");
+        assert!(
+            !escaped.join("toss-zip-slip-should-not-exist").exists(),
+            "a file escaped the output root"
         );
     }
 }

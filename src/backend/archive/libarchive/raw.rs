@@ -174,8 +174,23 @@ pub const ARCHIVE_FORMAT_RAR: c_int = 0xD0000;
 /// them as one format (§6).
 pub const ARCHIVE_FORMAT_RAR_V5: c_int = 0x100000;
 
-/// `AE_IFDIR` as returned by [`archive_entry_filetype`].
+/// File-type bits, as returned by [`archive_entry_filetype`]. These are the
+/// POSIX mode values libarchive reuses; the platform-dependent part is only
+/// the width of the return type, which the function's signature carries.
+#[cfg(windows)]
+pub const AE_IFMT: u16 = 0o170000;
+#[cfg(windows)]
+pub const AE_IFREG: u16 = 0o100000;
+#[cfg(windows)]
+pub const AE_IFLNK: u16 = 0o120000;
 #[cfg(windows)]
 pub const AE_IFDIR: u16 = 0o040000;
+
+#[cfg(not(windows))]
+pub const AE_IFMT: u32 = 0o170000;
+#[cfg(not(windows))]
+pub const AE_IFREG: u32 = 0o100000;
+#[cfg(not(windows))]
+pub const AE_IFLNK: u32 = 0o120000;
 #[cfg(not(windows))]
 pub const AE_IFDIR: u32 = 0o040000;
