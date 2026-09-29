@@ -79,6 +79,10 @@ fn route(verb: Option<Verb>, input: &Input, kind: Kind) -> Result<(), TossError>
         // whether the input is something a directory packer can use (§4.2).
         Some(Verb::Pack) => crate::handlers::directory::compress(input.path()),
 
+        // `toss view photo.jpg` — same again; the handler decides whether the
+        // input is something a viewer can open (§4.2).
+        Some(Verb::View) => crate::handlers::image::view(input.path()),
+
         // The remaining verbs have no handler yet, so naming one is still
         // the most useful reply (§4.2).
         Some(verb) => Err(TossError::not_implemented(verb.as_str())),
@@ -90,6 +94,11 @@ fn route(verb: Option<Verb>, input: &Input, kind: Kind) -> Result<(), TossError>
 
             // `toss folder/` — §18.2's default action for a directory.
             Kind::Directory => crate::handlers::directory::compress(input.path()),
+
+            // `toss photo.jpg` — §18.3's default action for an image. What the
+            // viewer does with it is the platform's answer; whether it is an
+            // image and which images sit beside it is decided before that.
+            Kind::Image => crate::handlers::image::view(input.path()),
 
             // Everything else still has no handler: describe the input, then
             // say which default action is missing (§7, §5).
@@ -211,16 +220,16 @@ mod tests {
 
     #[test]
     fn a_verb_with_no_handler_still_names_what_is_missing() {
-        // `extract` has a handler as of step 7; the verbs that do not still
-        // answer with the thing they are missing (§4.2).
+        // `extract`, `pack` and `view` have handlers now; the verbs that do
+        // not still answer with the thing they are missing (§4.2).
         let err = run(Command::Explicit {
-            verb: Verb::View,
+            verb: Verb::Hash,
             args: vec![manifest("Cargo.toml")],
         })
-        .expect_err("there is no image viewer yet");
+        .expect_err("there is no checksum printer yet");
 
         assert_eq!(err.exit_code(), ExitCode::UnsupportedFormat);
-        assert!(err.to_string().contains("view"));
+        assert!(err.to_string().contains("hash"));
     }
 
     #[test]

@@ -22,6 +22,7 @@ use crate::core::error::TossError;
 
 pub mod archive;
 pub mod directory;
+pub mod image;
 
 /// Turn a backend failure into something Toss can report (§23).
 ///

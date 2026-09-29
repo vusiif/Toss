@@ -14,7 +14,10 @@ categories = ["command-line-utilities"]
 default = []
 
 archive = []
-image = []
+# Enables the Windows image viewer, and with it the `windows` dependency
+# below. The feature is empty on non-Windows targets because that dependency
+# cannot be built there at all (IMAGE_VIEWER.md §3).
+image = ["dep:windows"]
 media = []
 inspect = []
 hash = []
@@ -31,6 +34,24 @@ full = [
 ]
 
 [dependencies]
+
+# Target-gated rather than a plain dependency: `windows` does not compile on
+# non-Windows targets, so a `[dependencies]` entry here would break the Linux
+# leg of CI. Optional so that only the `image` feature pays for it — a build
+# without the feature is byte-identical to one that never heard of it.
+#
+# Only the features Phase 6 actually uses are enabled; widening this list is a
+# change to the dependency closure and needs a fresh decision (IMAGE_VIEWER.md
+# §11). `Win32`, `Win32_Graphics`, `Win32_System` and `Win32_UI` are implied
+# parents of the leaves below.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", optional = true, features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_Imaging",
+    "Win32_System_Com",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "warn"
