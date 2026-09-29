@@ -118,6 +118,64 @@ unsafe extern "C" {
     /// is itself borrowed from `archive`.
     pub fn archive_entry_pathname(entry: *mut ArchiveEntry) -> *const c_char;
 
+    /// Wide-character form of the member name, Windows only. Needed for the
+    /// same reason as the wide open: an entry name is not required to be
+    /// valid UTF-8 (§22).
+    #[cfg(windows)]
+    pub fn archive_entry_pathname_w(entry: *mut ArchiveEntry) -> *const u16;
+
     /// Uncompressed size in bytes, or -1 when the archive does not say.
     pub fn archive_entry_size(entry: *mut ArchiveEntry) -> i64;
+
+    /// Whether `archive_entry_size` carries a real value.
+    pub fn archive_entry_size_is_set(entry: *mut ArchiveEntry) -> c_int;
+
+    /// The type bits of the current entry — `AE_IFDIR` and friends.
+    ///
+    /// The C type is `__LA_MODE_T`, which libarchive defines per platform:
+    /// `unsigned short` under MSVC, `mode_t` (`unsigned int` on glibc)
+    /// elsewhere. Declaring it the same on both would read whatever happens
+    /// to sit in the upper bits of the return register, so the signature is
+    /// cfg'd to match what the callee actually returns (§31). macOS uses a
+    /// 16-bit `mode_t` and needs a third branch when it becomes a target
+    /// (§36); it is not one yet.
+    #[cfg(windows)]
+    pub fn archive_entry_filetype(entry: *mut ArchiveEntry) -> u16;
+    #[cfg(not(windows))]
+    pub fn archive_entry_filetype(entry: *mut ArchiveEntry) -> u32;
+
+    /// Format of the entry just returned, as an `ARCHIVE_FORMAT_*` value.
+    pub fn archive_format(archive: *mut Archive) -> c_int;
+
+    /// Short lowercase name for the format, e.g. `"zip"`. Borrowed from
+    /// `archive`; copy before freeing.
+    pub fn archive_format_name(archive: *mut Archive) -> *const c_char;
+
+    /// Number of filters in the current stack — 0 for a bare archive, 1 for
+    /// something like `foo.tar.gz`. This is the compression half of §6's
+    /// format/compression split.
+    pub fn archive_filter_count(archive: *mut Archive) -> c_int;
+
+    /// Name of filter `index`, e.g. `"gzip"`. Borrowed from `archive`.
+    pub fn archive_filter_name(archive: *mut Archive, index: c_int) -> *const c_char;
+
+    /// Discard the remainder of the current entry so the next header call
+    /// advances. Cheaper than reading data we only intend to count past.
+    pub fn archive_read_data_skip(archive: *mut Archive) -> c_int;
 }
+
+/// Container formats Toss recognises (§6). Kept here because these are
+/// libarchive's numbering, and §4 keeps libarchive concepts inside this
+/// directory — the domain's own [`ArchiveFormat`] lives one level up.
+pub const ARCHIVE_FORMAT_ZIP: c_int = 0x50000;
+pub const ARCHIVE_FORMAT_7ZIP: c_int = 0xE0000;
+pub const ARCHIVE_FORMAT_RAR: c_int = 0xD0000;
+/// RAR 5.x reports a distinct code from RAR 4.x, even though Toss treats
+/// them as one format (§6).
+pub const ARCHIVE_FORMAT_RAR_V5: c_int = 0x100000;
+
+/// `AE_IFDIR` as returned by [`archive_entry_filetype`].
+#[cfg(windows)]
+pub const AE_IFDIR: u16 = 0o040000;
+#[cfg(not(windows))]
+pub const AE_IFDIR: u32 = 0o040000;
