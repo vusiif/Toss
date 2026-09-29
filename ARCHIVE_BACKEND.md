@@ -2482,3 +2482,59 @@ choice". It is now "libarchive plus the two codecs it needs adds 333,824
 bytes and every target format decodes". For a project where §16 makes
 binary size a first-class metric, the second sentence is the one that
 justifies the decision.
+
+---
+
+# 55. Binary Size And Dependency Closure (Phase 4, step 8)
+
+> Status: **Measured**
+>
+> All figures from `cargo build --release --locked` on the primary
+> development target. No number here is estimated.
+
+## 55.1 Size
+
+| Build | `toss.exe` |
+|---|---|
+| pre-archive — without the `archive` feature | **186,880** |
+| post-archive — `--all-features` | **529,920** |
+| **delta** | **+343,040 bytes (+0.33 MB)** |
+
+For continuity with earlier records, the size measured before any handler
+existed was 168,448; the pre-archive figure grew to 186,880 as the CLI,
+detection and info paths gained code, which is unrelated to archive support.
+
+## 55.2 Native dependency closure
+
+**Shipped as part of `toss.exe` — statically linked, no separate files:**
+
+| Static library | Size at build time | Provides |
+|---|---|---|
+| `archive.lib` | 2,817,088 | libarchive 3.8.9 |
+| `lzma.lib` | 578,218 | liblzma 5.6.4 (LZMA/LZMA2) |
+| `zlibstatic.lib` | 201,108 | zlib 1.3.1 (Deflate) |
+
+**Runtime imports of the shipped binary:**
+
+```text
+KERNEL32.dll
+ntdll.dll
+VCRUNTIME140.dll
+```
+
+**Identical to the pre-archive baseline.** No `zlib.dll`, no `lzma.dll`, no
+`archive.dll`, no system libarchive. The MSVC runtimes were already a
+dependency of any Rust MSVC binary and are not attributable to this work
+(§44).
+
+**Required to build, not to run:** CMake, a C compiler (MSVC on Windows, cc
+on Linux), and no network access — the sources are vendored (§25).
+
+## 55.3 What is not counted here
+
+The `release` figure is measured with the archive subsystem present but
+unused: nothing in the product yet routes an input through it in a way that
+forces the linker to keep more than it needs. The first time a handler is
+wired end to end the number will move again, and §27 asks for that to be
+recorded when it does rather than smoothed over.
+
