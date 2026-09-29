@@ -12,16 +12,26 @@ use crate::core::exit_code::ExitCode;
 
 /// A failure Toss reports instead of panicking.
 #[derive(Debug)]
-#[allow(dead_code)] // `UnsupportedFormat`, `CorruptInput` and `OutputConflict` are the §24 codes reserved for format handling (Phase 4) and conflict policy (§27).
 pub enum TossError {
     InvalidArguments(String),
     InputNotFound(PathBuf),
     PermissionDenied(PathBuf),
     UnsupportedFormat(PathBuf),
     NotImplemented(String),
-    CorruptInput(PathBuf),
+    /// The input was recognised and found broken, with libarchive's own words
+    /// kept as context (§23). Distinguishing this from "unsupported" is what
+    /// lets a script tell a bad file from an unhandled one (§24, code 6).
+    CorruptInput {
+        path: PathBuf,
+        context: String,
+    },
     OutputConflict(PathBuf),
     Io(io::Error),
+    /// Anything with a message that has no dedicated exit code of its own.
+    ///
+    /// Archive security rejections and backend diagnostics land here (§23):
+    /// they must reach the user as words rather than as a bare status.
+    Other(String),
 }
 
 impl TossError {
@@ -35,6 +45,12 @@ impl TossError {
     #[must_use]
     pub fn not_implemented(what: impl Into<String>) -> Self {
         Self::NotImplemented(what.into())
+    }
+
+    /// Build an error from a complete sentence, reported as a generic failure.
+    #[must_use]
+    pub fn other(message: impl Into<String>) -> Self {
+        Self::Other(message.into())
     }
 
     /// Map an IO failure onto the most specific variant for `path`.
@@ -58,8 +74,8 @@ impl TossError {
             Self::InputNotFound(_) => ExitCode::NotFound,
             Self::PermissionDenied(_) => ExitCode::PermissionDenied,
             Self::UnsupportedFormat(_) | Self::NotImplemented(_) => ExitCode::UnsupportedFormat,
-            Self::CorruptInput(_) => ExitCode::CorruptInput,
-            Self::OutputConflict(_) | Self::Io(_) => ExitCode::Failure,
+            Self::CorruptInput { .. } => ExitCode::CorruptInput,
+            Self::OutputConflict(_) | Self::Io(_) | Self::Other(_) => ExitCode::Failure,
         }
     }
 }
@@ -73,14 +89,21 @@ impl fmt::Display for TossError {
             Self::InputNotFound(path) => write!(f, "input not found: {}", path.display()),
             Self::PermissionDenied(path) => write!(f, "permission denied: {}", path.display()),
             Self::UnsupportedFormat(path) => {
-                write!(f, "no handler for this input yet: {}", path.display())
+                write!(f, "unsupported format: {}", path.display())
             }
             Self::NotImplemented(what) => write!(f, "not implemented yet: {what}"),
-            Self::CorruptInput(path) => {
-                write!(f, "input is corrupted or incomplete: {}", path.display())
+            Self::CorruptInput { path, context } => {
+                write!(
+                    f,
+                    "input is corrupted or incomplete: {} ({context})",
+                    path.display()
+                )
             }
             Self::OutputConflict(path) => write!(f, "output already exists: {}", path.display()),
             Self::Io(err) => write!(f, "{err}"),
+            // The caller writes a whole sentence; adding a prefix here would
+            // double up on the wording it chose (§23).
+            Self::Other(message) => write!(f, "{message}"),
         }
     }
 }
@@ -130,7 +153,10 @@ mod tests {
                 ExitCode::UnsupportedFormat,
             ),
             (
-                TossError::CorruptInput(path.clone()),
+                TossError::CorruptInput {
+                    path: path.clone(),
+                    context: "damaged header".to_owned(),
+                },
                 ExitCode::CorruptInput,
             ),
             (TossError::OutputConflict(path), ExitCode::Failure),
@@ -173,9 +199,6 @@ mod tests {
     #[test]
     fn a_unicode_path_survives_into_the_message() {
         let err = TossError::UnsupportedFormat(PathBuf::from("报告 😊.zip"));
-        assert_eq!(
-            err.to_string(),
-            "no handler for this input yet: 报告 😊.zip"
-        );
+        assert_eq!(err.to_string(), "unsupported format: 报告 😊.zip");
     }
 }

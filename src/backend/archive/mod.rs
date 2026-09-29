@@ -86,6 +86,10 @@ impl ArchiveRouter {
     /// `None` means nothing compiled in can do the job — a different statement
     /// from "the archive is bad", and the two must stay distinguishable so
     /// routing can never confuse them (§42).
+    ///
+    /// [`ArchiveFormat::Unknown`] is a wildcard. Automatic mode has classified
+    /// an input as an archive without yet saying which kind, and asking for
+    /// "anything that can read" is exactly what probing is for (§41).
     pub fn select(&self, format: ArchiveFormat, write: bool) -> Option<&dyn ArchiveBackend> {
         self.backends
             .iter()
@@ -97,10 +101,29 @@ impl ArchiveRouter {
                     capabilities.read
                 };
 
-                supported.contains(&format)
+                match format {
+                    ArchiveFormat::Unknown => !supported.is_empty(),
+                    other => supported.contains(&other),
+                }
             })
             .map(|backend| backend.as_ref())
     }
+}
+
+/// A router holding every backend this build compiled in (§7, §14).
+///
+/// The only `cfg` in the archive domain lives here rather than in the handler
+/// or the dispatcher, because §12 allows platform and feature conditionals in
+/// `backend/` and forbids them everywhere above it. A build without the
+/// `archive` feature gets an empty router, which reads as "no backend" rather
+/// than as a failure (§42).
+pub fn router() -> ArchiveRouter {
+    let mut router = ArchiveRouter::empty();
+
+    #[cfg(feature = "archive")]
+    router.register(Box::new(libarchive::LibarchiveBackend));
+
+    router
 }
 
 impl std::fmt::Display for ArchiveError {

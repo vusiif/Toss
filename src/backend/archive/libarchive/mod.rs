@@ -1,16 +1,56 @@
 //! libarchive binding.
 //!
-//! Phase 4 step 3: prove that the vendored C library builds, links, and can
-//! be opened and released from Rust before any higher-level functionality
-//! is built on top of it (§45 step 3).
-//!
-//! [`raw`] is deliberately the whole surface for now. The safe wrapper, the
-//! backend implementation and the routing that uses them arrive in steps 4
-//! through 7; nothing above this module may see a single symbol declared in
-//! [`raw`] (§4, §24).
+//! Layering, bottom to top (§24, §32): [`raw`] holds the declarations,
+//! [`reader`] owns the handle and its lifetime, and [`LibarchiveBackend`]
+//! turns those into the operations [`super::ArchiveBackend`] promises.
+//! Nothing above this module sees a `*mut Archive` or an `ARCHIVE_OK` (§4).
 
 pub mod raw;
 pub mod reader;
+
+use super::ArchiveBackend;
+use super::types::{
+    ArchiveCapabilities, ArchiveEntry, ArchiveError, ArchiveFormat, ArchiveInput, ArchiveProbe,
+    ExtractRequest, ExtractResult,
+};
+use reader::Reader;
+
+/// The libarchive implementation of [`ArchiveBackend`].
+///
+/// A unit struct on purpose: it holds no state, because every operation owns
+/// its own reader from creation to release. Registering it is the single
+/// `cfg(feature = "archive")` in the archive domain (§12).
+#[derive(Debug, Default, Clone, Copy)]
+pub struct LibarchiveBackend;
+
+impl ArchiveBackend for LibarchiveBackend {
+    fn capabilities(&self) -> ArchiveCapabilities {
+        ArchiveCapabilities {
+            // Exactly what §18.1's milestone asks for. Not `support_format_all`:
+            // naming a format here means Toss has admitted it (§3, §37).
+            read: &[
+                ArchiveFormat::Zip,
+                ArchiveFormat::SevenZip,
+                ArchiveFormat::Rar,
+            ],
+            // `create` does not exist yet, so nothing claims to write. Phase 5
+            // adds it to this same trait rather than a second one (§46).
+            write: &[],
+        }
+    }
+
+    fn probe(&self, input: &ArchiveInput) -> Result<ArchiveProbe, ArchiveError> {
+        Reader::probe(input.primary())
+    }
+
+    fn list(&self, input: &ArchiveInput) -> Result<Vec<ArchiveEntry>, ArchiveError> {
+        Reader::list(input.primary())
+    }
+
+    fn extract(&self, request: &ExtractRequest) -> Result<ExtractResult, ArchiveError> {
+        Reader::extract(request)
+    }
+}
 
 #[cfg(test)]
 mod tests {

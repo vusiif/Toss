@@ -10,8 +10,9 @@
 //! become an automatic destructive default.
 //!
 //! Dispatching lives in `dispatch/`; this module is where handlers themselves
-//! are declared and registered, and it stays empty until the first real one
-//! arrives in Phase 4. Building the registration machinery before there is
-//! anything to register would be abstraction for its own sake (§42).
+//! are declared. Each is a plain function rather than a registry: there is
+//! nothing yet that would justify machinery to look one up (§42).
 //!
 //! Phases 4 through 7 fill this module.
+
+pub mod archive;

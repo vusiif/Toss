@@ -70,22 +70,32 @@ fn resolve_inputs(paths: &[PathBuf]) -> Result<Vec<Input>, TossError> {
 /// states plainly which action it could not perform.
 fn route(verb: Option<Verb>, input: &Input, kind: Kind) -> Result<(), TossError> {
     match verb {
-        // An explicit verb already states the intent, so the reply names it.
-        // Requesting an action is not a request for a description (§4.2).
+        // `toss extract archive.7z` — the verb states the action outright
+        // (§4.2), so it goes straight to the handler that performs it.
+        Some(Verb::Extract) => crate::handlers::archive::extract(input.path()),
+
+        // The remaining verbs have no handler yet, so naming one is still
+        // the most useful reply (§4.2).
         Some(verb) => Err(TossError::not_implemented(verb.as_str())),
 
-        // Automatic mode: describe the input first (§7), then say whether a
-        // default action existed that could not be carried out (§5).
-        None => {
-            log::out(&info::gather(input.path()).render(kind.label()));
+        None => match kind {
+            // `toss archive.7z` — the classifier already decided what this
+            // is (§6), and dispatch exists to hand that decision onward (§9).
+            Kind::Archive => crate::handlers::archive::extract(input.path()),
 
-            match kind.default_action() {
-                Some(action) => Err(TossError::not_implemented(action)),
-                // Nothing was ever going to happen to this file, so the
-                // description is the entire answer — and that is a success.
-                None => Ok(()),
+            // Everything else still has no handler: describe the input, then
+            // say which default action is missing (§7, §5).
+            other => {
+                log::out(&info::gather(input.path()).render(other.label()));
+
+                match other.default_action() {
+                    Some(action) => Err(TossError::not_implemented(action)),
+                    // Nothing was ever going to happen to this file, so the
+                    // description is the entire answer — and that is a success.
+                    None => Ok(()),
+                }
             }
-        }
+        },
     }
 }
 
@@ -140,15 +150,17 @@ mod tests {
     }
 
     #[test]
-    fn a_verb_is_routed_to_the_handler_that_has_not_been_written() {
+    fn a_verb_with_no_handler_still_names_what_is_missing() {
+        // `extract` has a handler as of step 7; the verbs that do not still
+        // answer with the thing they are missing (§4.2).
         let err = run(Command::Explicit {
-            verb: Verb::Extract,
+            verb: Verb::View,
             args: vec![manifest("Cargo.toml")],
         })
-        .expect_err("extract has no handler yet");
+        .expect_err("there is no image viewer yet");
 
         assert_eq!(err.exit_code(), ExitCode::UnsupportedFormat);
-        assert!(err.to_string().contains("extract"));
+        assert!(err.to_string().contains("view"));
     }
 
     #[test]
@@ -197,9 +209,10 @@ mod tests {
     fn a_kind_with_a_default_action_states_the_action_it_could_not_perform() {
         let path = manifest("Cargo.toml");
 
+        // `Kind::Archive` is absent on purpose: step 7 wired it to the
+        // extraction handler, so it no longer reports a missing action.
         let cases = [
             (Kind::Directory, "directory compression"),
-            (Kind::Archive, "archive extraction"),
             (Kind::Image, "image viewing"),
             (Kind::Media, "media playback"),
         ];
