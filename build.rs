@@ -12,11 +12,69 @@
 //! are, so both must be built first.
 
 use std::env;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// Where native artifacts are kept, relative to the workspace root.
+///
+/// Outside `target/` on purpose: `cargo clean` must not throw them away, and
+/// no other cache needs to know they exist.
+const NATIVE_CACHE: &str = ".native-cache";
+
+/// Configure flags that decide what zlib becomes. The install prefix is not
+/// listed because it says *where* the result lands, not *what* it is.
+const ZLIB_OPTIONS: &[&str] = &["-DBUILD_SHARED_LIBS=OFF", "-DZLIB_BUILD_EXAMPLES=OFF"];
+
+/// Configure flags that decide what liblzma becomes.
+const XZ_OPTIONS: &[&str] = &["-DBUILD_SHARED_LIBS=OFF"];
+
+/// Configure flags that decide what libarchive becomes.
+///
+/// `CMAKE_BUILD_TYPE` is fixed at Release so the debug and release profiles
+/// share one native build. The codec paths are excluded because they live in
+/// `OUT_DIR` and differ per invocation while meaning the same thing.
+const LIBARCHIVE_OPTIONS: &[&str] = &[
+    "-DBUILD_SHARED_LIBS=OFF",
+    "-DCMAKE_BUILD_TYPE=Release",
+    // Everything below is switched off on purpose (§3): a format Toss does
+    // not use still has to be configured, compiled and audited. Enabling a
+    // format because libarchive happens to offer it is precisely what the
+    // feature-admission test forbids (§37).
+    "-DENABLE_TEST=OFF",
+    "-DENABLE_TAR=OFF",
+    "-DENABLE_CPIO=OFF",
+    "-DENABLE_CAT=OFF",
+    "-DENABLE_UNZIP=OFF",
+    "-DENABLE_EXPAT=OFF",
+    "-DENABLE_LIBXML2=OFF",
+    "-DENABLE_WIN32_XMLLITE=OFF",
+    "-DENABLE_OPENSSL=OFF",
+    "-DENABLE_MBEDTLS=OFF",
+    "-DENABLE_Nettle=OFF",
+    "-DENABLE_CNG=OFF",
+    "-DENABLE_ACL=OFF",
+    "-DENABLE_XATTR=OFF",
+    "-DENABLE_ICONV=OFF",
+    "-DENABLE_LZO=OFF",
+    "-DENABLE_LIBB2=OFF",
+    "-DENABLE_LZ4=OFF",
+    "-DENABLE_PCREPOSIX=OFF",
+    "-DENABLE_PCRE2POSIX=OFF",
+    "-DENABLE_BZip2=OFF",
+    "-DENABLE_ZSTD=OFF",
+    // Left ON on purpose. libarchive's CMakeLists spells the disabled branch
+    // as a FATAL_ERROR saying libgcc not found — twice, at lines 1334 and
+    // 1396 — so turning it off fails the configure.
+    "-DENABLE_LIBGCC=ON",
+    // The two codecs this milestone needs (§18.1): Deflate for ZIP entries,
+    // LZMA/LZMA2 for 7z entries.
+    "-DENABLE_ZLIB=ON",
+    "-DENABLE_LZMA=ON",
+];
+
 fn main() {
-    // Only these inputs may retrigger a rebuild. libarchive alone takes ~200s
+    // Only these inputs may retrigger a rebuild. libarchive alone takes ~350s
     // to configure, so it must not rerun because an unrelated Rust file moved.
     println!("cargo:rerun-if-changed=third_party/libarchive");
     println!("cargo:rerun-if-changed=third_party/zlib");
@@ -29,13 +87,25 @@ fn main() {
 
     let manifest = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("cargo sets this"));
     let out = PathBuf::from(env::var_os("OUT_DIR").expect("cargo sets this"));
-    let cmake = find_cmake();
+    let cache = manifest
+        .join(NATIVE_CACHE)
+        .join(native_fingerprint(&manifest));
 
-    // zlib first, then liblzma: neither depends on the other, but libarchive
-    // depends on both, so they have to exist before its configure runs.
-    let zlib = build_zlib(&cmake, &manifest, &out);
-    let lzma = build_lzma(&cmake, &manifest, &out);
-    let archive = build_libarchive(&cmake, &manifest, &out, &zlib, &lzma);
+    let (archive, zlib, lzma) = match restore(&out, &cache) {
+        Some(libraries) => libraries,
+        None => {
+            let cmake = find_cmake();
+
+            // zlib first, then liblzma: neither depends on the other, but
+            // libarchive depends on both, so both exist before its configure.
+            let zlib = build_zlib(&cmake, &manifest, &out);
+            let lzma = build_lzma(&cmake, &manifest, &out);
+            let archive = build_libarchive(&cmake, &manifest, &out, &zlib, &lzma);
+
+            store(&out, &cache, [&archive, &zlib, &lzma]);
+            (archive, zlib, lzma)
+        }
+    };
 
     // Order is deliberate: archive references the codecs, so it comes first.
     for library in [&archive, &zlib, &lzma] {
@@ -59,6 +129,275 @@ fn main() {
         for system in ["bcrypt", "crypt32"] {
             println!("cargo:rustc-link-lib={system}");
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Fingerprint
+// ---------------------------------------------------------------------------
+
+/// What the native libraries would have been built from.
+///
+/// `OUT_DIR` is deliberately absent: cargo hands every profile and every
+/// invocation a different one, and keying on it would mean paying for a full
+/// CMake build each time — the exact cost this exists to avoid.
+fn native_fingerprint(manifest: &Path) -> String {
+    let mut state = Fnv::new();
+
+    state.feed(env::consts::OS.as_bytes());
+    for name in [
+        "CARGO_CFG_TARGET",
+        "CARGO_CFG_TARGET_ARCH",
+        "CARGO_CFG_TARGET_ENV",
+    ] {
+        state.feed(name.as_bytes());
+        state.feed(env::var(name).unwrap_or_default().as_bytes());
+    }
+
+    for option in ZLIB_OPTIONS
+        .iter()
+        .chain(XZ_OPTIONS)
+        .chain(LIBARCHIVE_OPTIONS)
+    {
+        state.feed(option.as_bytes());
+    }
+
+    // The native-build logic itself: changing how these are built must not
+    // reuse artifacts built the old way.
+    if let Ok(source) = fs::read(manifest.join("build.rs")) {
+        state.feed(&source);
+    }
+
+    for library in ["zlib", "xz", "libarchive"] {
+        state.feed(tree_hash(&manifest.join("third_party").join(library)).as_bytes());
+    }
+
+    state.feed(c_toolchain_fingerprint().as_bytes());
+
+    format!("{:016x}", state.finish())
+}
+
+/// FNV-1a. std's `DefaultHasher` is explicitly unspecified across releases,
+/// and a cache key that silently changes with the compiler is not a key.
+struct Fnv(u64);
+
+impl Fnv {
+    fn new() -> Self {
+        Self(0xcbf2_9ce4_8422_2325)
+    }
+
+    fn feed(&mut self, bytes: &[u8]) {
+        for byte in bytes {
+            self.0 ^= u64::from(*byte);
+            self.0 = self.0.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+
+    fn finish(&self) -> u64 {
+        self.0
+    }
+}
+
+/// Content hash of a directory: each relative name and its bytes, in a
+/// stable order.
+///
+/// Content rather than mtime, because a fresh checkout rewrites timestamps
+/// while leaving the bytes identical — keying on mtime would miss every clone.
+fn tree_hash(root: &Path) -> String {
+    let mut names = Vec::new();
+    collect_names(root, root, &mut names);
+    names.sort();
+
+    let mut state = Fnv::new();
+    for name in &names {
+        state.feed(&(name.len() as u64).to_le_bytes());
+        state.feed(name.as_bytes());
+
+        let bytes = fs::read(root.join(name)).unwrap_or_default();
+        state.feed(&(bytes.len() as u64).to_le_bytes());
+        state.feed(&bytes);
+    }
+
+    format!("{:016x}", state.finish())
+}
+
+fn collect_names(root: &Path, dir: &Path, out: &mut Vec<String>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(relative) = path.strip_prefix(root) else {
+            continue;
+        };
+
+        if path.is_dir() {
+            collect_names(root, &path, out);
+            continue;
+        }
+
+        // Separators normalised so the hash does not depend on the platform.
+        out.push(
+            relative
+                .components()
+                .map(|part| part.as_os_str().to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+                .join("/"),
+        );
+    }
+}
+
+/// A coarse identity for the C toolchain: enough to notice a different
+/// compiler or ABI generation, coarse enough not to invalidate on a patch
+/// release. The libraries are C, and their ABI does not move with patches.
+fn c_toolchain_fingerprint() -> String {
+    if env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+        let toolsets = msvc_toolsets();
+        return if toolsets.is_empty() {
+            "msvc:none".to_owned()
+        } else {
+            format!("msvc:{}", toolsets.join(","))
+        };
+    }
+
+    let Some(machine) = cc_flag("-dumpmachine") else {
+        return "cc:unknown".to_owned();
+    };
+    let Some(version) = cc_flag("-dumpversion") else {
+        return format!("cc:{machine}:unknown");
+    };
+
+    let major = version.split('.').next().unwrap_or(&version);
+    format!("cc:{machine}:{major}")
+}
+
+fn cc_flag(flag: &str) -> Option<String> {
+    let output = Command::new("cc").arg(flag).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    (!value.is_empty()).then_some(value)
+}
+
+/// MSVC toolsets visible in the usual install locations.
+///
+/// A targeted three-level walk rather than a general search: the layout is
+/// `<root>/<edition>/<year>/VC/Tools/MSVC/<toolset>`, and a full search would
+/// walk the whole Visual Studio tree for four directory names.
+///
+/// Only the major version is kept — `14.51.36231` and `14.50.33307` are the
+/// same ABI generation, and keying on the patch number would drop the cache
+/// every time Visual Studio updates.
+fn msvc_toolsets() -> Vec<String> {
+    let mut found = Vec::new();
+
+    for root in [
+        r"C:\Program Files\Microsoft Visual Studio",
+        r"C:\Program Files (x86)\Microsoft Visual Studio",
+        r"C:\BuildTools",
+    ] {
+        let Ok(editions) = fs::read_dir(root) else {
+            continue;
+        };
+
+        for edition in editions.flatten() {
+            let Ok(years) = fs::read_dir(edition.path()) else {
+                continue;
+            };
+
+            for year in years.flatten() {
+                let tools = year.path().join("VC").join("Tools").join("MSVC");
+                let Ok(toolsets) = fs::read_dir(&tools) else {
+                    continue;
+                };
+
+                for toolset in toolsets.flatten() {
+                    let name = toolset.file_name().to_string_lossy().into_owned();
+                    let major = name.split('.').next().unwrap_or(&name).to_owned();
+                    found.push(major);
+                }
+            }
+        }
+    }
+
+    found.sort();
+    found.dedup();
+    found
+}
+
+// ---------------------------------------------------------------------------
+// Cache transfer
+// ---------------------------------------------------------------------------
+
+/// Copy a cached build into `out`, returning the three libraries.
+///
+/// Any shortfall yields `None` and the caller performs an ordinary build: a
+/// damaged or foreign cache must never be able to break compilation.
+fn restore(out: &Path, cache: &Path) -> Option<(PathBuf, PathBuf, PathBuf)> {
+    let manifest = fs::read_to_string(cache.join("manifest.txt")).ok()?;
+
+    let mut libraries = Vec::new();
+    for line in manifest.lines() {
+        let relative = line.trim();
+        if relative.is_empty() {
+            continue;
+        }
+
+        let from = cache.join(relative);
+        let to = out.join(relative);
+        if !from.is_file() {
+            return None;
+        }
+        if let Some(parent) = to.parent() {
+            fs::create_dir_all(parent).ok()?;
+        }
+        fs::copy(&from, &to).ok()?;
+        libraries.push(to);
+    }
+
+    if libraries.len() == 3 {
+        Some((
+            libraries[0].clone(),
+            libraries[1].clone(),
+            libraries[2].clone(),
+        ))
+    } else {
+        None
+    }
+}
+
+/// Copy the three libraries into the cache. Best effort: failing to cache a
+/// build that already succeeded must not fail the build.
+fn store(out: &Path, cache: &Path, libraries: [&Path; 3]) {
+    let _ = fs::remove_dir_all(cache);
+    let mut manifest = String::new();
+
+    for library in libraries {
+        let Ok(relative) = library.strip_prefix(out) else {
+            // Not produced under OUT_DIR: nothing we can attribute to a key.
+            return;
+        };
+
+        let destination = cache.join(relative);
+        if let Some(parent) = destination.parent() {
+            if fs::create_dir_all(parent).is_err() {
+                return;
+            }
+        }
+        if fs::copy(library, &destination).is_err() {
+            return;
+        }
+
+        manifest.push_str(&relative.to_string_lossy().replace('\\', "/"));
+        manifest.push('\n');
+    }
+
+    // Written last: a directory without a manifest is never restored, so a
+    // partial copy above leaves no cache rather than a broken one.
+    if fs::write(cache.join("manifest.txt"), &manifest).is_err() {
+        let _ = fs::remove_dir_all(cache);
     }
 }
 

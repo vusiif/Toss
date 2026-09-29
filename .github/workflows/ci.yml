@@ -37,6 +37,19 @@ jobs:
           rustup default stable
           rustup component add --toolchain stable rustfmt clippy
 
+      # The native libraries zlib + liblzma + libarchive are keyed by their
+      # real inputs — toolchain, configure flags, vendored sources, build.rs —
+      # not by the per-invocation OUT_DIR, so clippy, tests and release all
+      # share one build. rust-cache handles Rust dependencies; this handles
+      # only what rust-cache deliberately does not: build-script output.
+      - name: Cache native libraries
+        uses: actions/cache@v4
+        with:
+          path: .native-cache
+          key: ${{ runner.os }}-toss-native-${{ hashFiles('third_party/**', 'build.rs') }}
+          restore-keys: |
+            ${{ runner.os }}-toss-native-
+
       # Default behaviour, deliberately. build.rs compiles zlib, liblzma and
       # libarchive inside target/, so caching target/ caches the native build
       # too — no separate key, no extra directory to reason about.
@@ -151,6 +164,16 @@ jobs:
         run: |
           rustup set profile minimal
           rustup toolchain install "${{ steps.msrv.outputs.toolchain }}" --no-self-update
+
+      # Same key as the stable jobs: the native libraries do not care which
+      # Rust toolchain asked for them, so one cache serves all three jobs.
+      - name: Cache native libraries
+        uses: actions/cache@v4
+        with:
+          path: .native-cache
+          key: ${{ runner.os }}-toss-native-${{ hashFiles('third_party/**', 'build.rs') }}
+          restore-keys: |
+            ${{ runner.os }}-toss-native-
 
       # After the toolchain install: the cache key includes the compiler
       # version, so the toolchain has to exist before the cache is addressed.

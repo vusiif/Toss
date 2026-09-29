@@ -1,6 +1,11 @@
 # Build artifacts
 /target
 
+# Native artifacts cached by build.rs (§16/§27). Kept outside target/ so
+# `cargo clean` does not discard them and no other cache has to know about
+# them. Not version-controlled: they are per-machine build products.
+/.native-cache/
+
 # Documentation — only the files whitelisted here are version-controlled.
 # Everything else (*.md notes, docs/, doc/) stays out of commits.
 # ARCHIVE_BACKEND.md is whitelisted because it constrains future agents;
