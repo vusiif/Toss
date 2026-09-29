@@ -317,7 +317,8 @@ milestone rather than accumulated:
 |---|---|---|---|
 | before Phase 6 (`973b910`) | 664,064 | 189,952 | — |
 | M0, the boundary (`471cab1`) | 677,376 | 206,848 | +13,312 / +16,896 |
-| M1, the window | 685,056 | 206,848 | +7,680 / 0 |
+| M1, the window (`0d78668`) | 685,056 | 206,848 | +7,680 / 0 |
+| M2, WIC decode | 691,712 | 206,848 | +6,656 / 0 |
 
 Plus, from the §6 spike: `windows-rs` floor **+4,096 B**, transitive crates
 **+15**.

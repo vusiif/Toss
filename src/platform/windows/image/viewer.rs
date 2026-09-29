@@ -21,7 +21,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetMessageW, IDC_ARROW, LoadCursorW, MSG, PostQuitMessage, RegisterClassExW, SW_SHOW,
     ShowWindow, TranslateMessage, WM_DESTROY, WNDCLASS_STYLES, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
 };
-use windows::core::{Error, HSTRING, PCWSTR, w};
+use windows::core::{HSTRING, PCWSTR, w};
 
 use crate::core::error::TossError;
 use crate::platform::image::ViewRequest;
@@ -66,7 +66,7 @@ pub fn run(request: &ViewRequest) -> Result<(), TossError> {
             None,
         )
     }
-    .map_err(|err| failed("open a window", err))?;
+    .map_err(|err| super::failed("open a window", err))?;
 
     // SAFETY: `window` was just handed to us by the successful create above,
     // so it is live for exactly these calls. Both return a BOOL that reports
@@ -88,7 +88,8 @@ pub fn run(request: &ViewRequest) -> Result<(), TossError> {
 fn module() -> Result<HINSTANCE, TossError> {
     // SAFETY: a null module name asks for the calling process, which always
     // has one.
-    let module = unsafe { GetModuleHandleW(None) }.map_err(|err| failed("find itself", err))?;
+    let module =
+        unsafe { GetModuleHandleW(None) }.map_err(|err| super::failed("find itself", err))?;
 
     Ok(HINSTANCE(module.0))
 }
@@ -114,7 +115,7 @@ fn register_class(instance: HINSTANCE) -> Result<(), TossError> {
     // SAFETY: the system cursor is a shared, immortal handle; nothing here
     // owns it.
     let cursor = unsafe { LoadCursorW(None, IDC_ARROW) }
-        .map_err(|err| failed("load the arrow cursor", err))?;
+        .map_err(|err| super::failed("load the arrow cursor", err))?;
 
     let class = WNDCLASSEXW {
         cbSize: size_of::<WNDCLASSEXW>() as u32,
@@ -201,12 +202,4 @@ unsafe extern "system" fn window_proc(
 
         DefWindowProcW(window, message, wparam, lparam)
     }
-}
-
-/// Turn a `windows-rs` failure into something Toss can say (§23).
-///
-/// The HRESULT never leaves this module: a user reads a sentence, and the
-/// platform layer is the only place that knows it came from a platform.
-fn failed(step: &str, err: Error) -> TossError {
-    TossError::other(format!("image viewer could not {step}: {err}"))
 }
