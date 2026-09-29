@@ -339,6 +339,7 @@ milestone rather than accumulated:
 | M1, the window (`0d78668`) | 685,056 | 206,848 | +7,680 / 0 |
 | M2, WIC decode (`0ea8620`) | 691,712 | 206,848 | +6,656 / 0 |
 | M3, first render | 693,248 | 206,848 | +1,536 / 0 |
+| M4, zoom | 694,272 | 206,848 | +1,024 / 0 |
 
 Plus, from the §6 spike: `windows-rs` floor **+4,096 B**, transitive crates
 **+15**.

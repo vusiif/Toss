@@ -10,7 +10,8 @@ use std::mem::size_of;
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BeginPaint, COLOR_WINDOW, DIB_RGB_COLORS, EndPaint,
-    GetSysColorBrush, HDC, PAINTSTRUCT, RGBQUAD, SRCCOPY, StretchDIBits, UpdateWindow,
+    GetSysColorBrush, HDC, InvalidateRect, PAINTSTRUCT, RGBQUAD, SRCCOPY, StretchDIBits,
+    UpdateWindow,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{
@@ -20,13 +21,14 @@ use windows::Win32::UI::WindowsAndMessaging::{
     AdjustWindowRectEx, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW,
     DispatchMessageW, GWLP_USERDATA, GetMessageW, GetWindowLongPtrW, IDC_ARROW, LoadCursorW, MSG,
     PostQuitMessage, RegisterClassExW, SW_SHOW, SetWindowLongPtrW, ShowWindow, TranslateMessage,
-    WM_DESTROY, WM_NCDESTROY, WM_PAINT, WNDCLASS_STYLES, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
+    WM_DESTROY, WM_MOUSEWHEEL, WM_NCDESTROY, WM_PAINT, WNDCLASS_STYLES, WNDCLASSEXW,
+    WS_OVERLAPPEDWINDOW,
 };
 use windows::core::{HSTRING, PCWSTR, w};
 
 use super::decode::Decoded;
 use crate::core::error::TossError;
-use crate::platform::image::ViewRequest;
+use crate::platform::image::{ViewRequest, zoom};
 
 /// Class name for every window this process creates.
 const CLASS_NAME: PCWSTR = w!("TossImageViewer");
@@ -38,10 +40,13 @@ const CLASS_NAME: PCWSTR = w!("TossImageViewer");
 /// which is what makes the three ways a window can end — creation refused,
 /// the loop failing, the window closing — all reduce to "one box, one drop".
 ///
-/// M3 carries only the decoded pixels. Zoom, pan and the viewport arrive with
-/// the milestones that need them rather than now (§42).
+/// `zoom` is the *cursor* into the ladder Toss defines (`platform::image`);
+/// the ladder itself is a rule and does not live here. That is the split
+/// `IMAGE_VIEWER.md` §4 draws: the wheel event belongs to this half, the
+/// levels it moves between do not.
 struct ViewerState {
     image: Decoded,
+    zoom: usize,
 }
 
 /// Show `image` in a native window and run until it closes.
@@ -66,7 +71,10 @@ pub fn run(request: &ViewRequest, image: Decoded) -> Result<(), TossError> {
     // The single allocation this viewer makes for its own bookkeeping. It
     // lives on this stack frame for the whole message loop, so every address
     // the window is later handed stays valid until nothing can read it.
-    let state = Box::new(ViewerState { image });
+    let state = Box::new(ViewerState {
+        image,
+        zoom: zoom::START,
+    });
     let (width, height) = outer_size(&state.image)?;
 
     // SAFETY: the class is registered, the title outlives the call, and no
@@ -261,6 +269,11 @@ fn pump() -> Result<(), TossError> {
 /// frees it — the slot is cleared when the window dies so nothing afterwards
 /// can read a stale address, and the box itself is dropped by [`run`], once,
 /// whether the window opened, failed to open or closed.
+///
+/// Each arm takes its own reference and lets go before anything that could
+/// re-enter this procedure. `DefWindowProcW` is free to send messages back at
+/// the same window, so a borrow held across it would be a second reference to
+/// the same state — and with a mutable one, undefined behaviour.
 unsafe extern "system" fn window_proc(
     window: HWND,
     message: u32,
@@ -281,14 +294,10 @@ unsafe extern "system" fn window_proc(
         }
 
         let slot = GetWindowLongPtrW(window, GWLP_USERDATA);
-        let state: Option<&ViewerState> = if slot == 0 {
-            None
-        } else {
-            Some(&*(slot as *const ViewerState))
-        };
 
-        match state {
-            Some(state) if message == WM_PAINT => {
+        match message {
+            WM_PAINT if slot != 0 => {
+                let state = &*(slot as *const ViewerState);
                 let mut paint = PAINTSTRUCT::default();
 
                 // SAFETY: `paint` is writable storage the system fills in and
@@ -301,7 +310,36 @@ unsafe extern "system" fn window_proc(
                 LRESULT(0)
             }
 
-            Some(_) if message == WM_DESTROY => {
+            WM_MOUSEWHEEL if slot != 0 => {
+                let state = &mut *(slot as *mut ViewerState);
+
+                // The wheel's distance is the *high* word of `wparam` and it
+                // is signed: read the low half instead, or read the word as
+                // unsigned, and a scroll down becomes a scroll up.
+                let wheel = (wparam.0 >> 16) as u16 as i16;
+
+                let next = if wheel > 0 {
+                    zoom::step_up(state.zoom)
+                } else if wheel < 0 {
+                    zoom::step_down(state.zoom)
+                } else {
+                    state.zoom
+                };
+
+                if next != state.zoom {
+                    state.zoom = next;
+
+                    // SAFETY: the window is live; a null rectangle means the
+                    // whole client area, which is exactly what a zoom
+                    // changes — and the erase flag clears what the smaller
+                    // picture no longer covers.
+                    let _ = InvalidateRect(Some(window), None, true);
+                }
+
+                LRESULT(0)
+            }
+
+            WM_DESTROY => {
                 PostQuitMessage(0);
                 LRESULT(0)
             }
@@ -315,42 +353,61 @@ unsafe extern "system" fn window_proc(
     }
 }
 
-/// Draw `state`'s pixels into `dc`, one to one, at the top left.
+/// Draw `state`'s pixels into `dc` at the current zoom, anchored at the top
+/// left.
 ///
-/// M3 draws at the image's own size because the window was made that size
-/// (see [`outer_size`]). Fit, interpolation and resizing are M4's: inventing
-/// them here would be the speculative abstraction §42 warns against, and
-/// none of them is needed to answer "can Toss show a decoded image".
+/// The *source* rectangle is always the whole image and the *destination* is
+/// its scaled size, which is the whole of what zooming is here: GDI does the
+/// interpolation, Toss supplies the ladder. Content past the client edge is
+/// clipped — panning is M5, and inventing a viewport now would be the §42
+/// abstraction this milestone is supposed to avoid.
 fn render(state: &ViewerState, dc: HDC) {
-    let width = state.image.width as i32;
-    let height = state.image.height as i32;
-    let info = bitmap_info(&state.image);
+    let image = &state.image;
+    let source = (image.width as i32, image.height as i32);
+    let destination = drawn_size(image, zoom::factor(state.zoom));
+    let info = bitmap_info(image);
 
     // SAFETY: `dc` came from the `BeginPaint` a line above and stays valid
     // until `EndPaint`; `info` describes `pixels`, which live as long as
     // `state`, which lives as long as the loop; `StretchDIBits` reads the
     // buffer during the call and does not keep it.
     unsafe {
-        // Zero means nothing was drawn. M3 has no recovery to attempt and no
-        // way to report one that a person would see — the manual smoke is
-        // what notices, and M7 gives this a real failure path rather than a
+        // Zero means nothing was drawn. M4 has no recovery to attempt and no
+        // way to report one that a person would see — the pixel probe is what
+        // notices, and M7 gives this a real failure path rather than a
         // swallowed return code.
         let _ = StretchDIBits(
             dc,
             0,
             0,
-            width,
-            height,
+            destination.0,
+            destination.1,
             0,
             0,
-            width,
-            height,
-            Some(state.image.pixels.as_ptr().cast()),
+            source.0,
+            source.1,
+            Some(image.pixels.as_ptr().cast()),
             &info,
             DIB_RGB_COLORS,
             SRCCOPY,
         );
     }
+}
+
+/// The size an image is drawn at, in client pixels.
+///
+/// Rounded, never zero and never past what an `i32` device coordinate holds:
+/// the scale is a `f64` and the dimensions came from a file, so this is
+/// arithmetic on numbers Toss did not choose (§23). `drawn_size(image, 1.0)`
+/// is the image's own size — M3's behaviour, unchanged at the default level.
+fn drawn_size(image: &Decoded, scale: f64) -> (i32, i32) {
+    let side = |length: u32| -> i32 {
+        (f64::from(length) * scale)
+            .round()
+            .clamp(1.0, f64::from(i32::MAX)) as i32
+    };
+
+    (side(image.width), side(image.height))
 }
 
 /// The `BITMAPINFO` that describes `image`'s buffer to GDI.
@@ -391,8 +448,8 @@ mod tests {
 
     use windows::Win32::Graphics::Gdi::BITMAPINFOHEADER;
 
-    use super::super::decode::decode;
-    use super::{bitmap_info, outer_size};
+    use super::super::decode::{Decoded, decode};
+    use super::{bitmap_info, drawn_size, outer_size};
 
     fn sample(name: &str) -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -451,5 +508,54 @@ mod tests {
             height > 5,
             "the vertical frame was not accounted for: {height}"
         );
+    }
+
+    #[test]
+    fn zooming_scales_the_destination_and_leaves_the_source_alone() {
+        // The whole of what a zoom is: the destination rectangle moves and
+        // the source stays the whole image, so nothing is cropped before GDI
+        // sees it — cropping at the client edge is panning's problem (M5).
+        let image = decode(&sample("odd.png")).expect("the sample decodes");
+
+        assert_eq!(
+            drawn_size(&image, 1.0),
+            (7, 5),
+            "the default level has to be M3's behaviour exactly"
+        );
+        assert_eq!(
+            drawn_size(&image, 0.25),
+            (2, 1),
+            "7*0.25 rounds to 2, 5*0.25 rounds to 1"
+        );
+        assert_eq!(drawn_size(&image, 4.0), (28, 20));
+    }
+
+    #[test]
+    fn a_scale_that_would_draw_nothing_still_draws_one_pixel() {
+        // Rounding a small side at the smallest level reaches zero, and
+        // asking GDI for a zero-wide rectangle is asking for a picture that
+        // never appears — with no error to say so.
+        let tiny = Decoded {
+            width: 1,
+            height: 1,
+            pixels: vec![0, 0, 0, 255],
+        };
+
+        assert_eq!(drawn_size(&tiny, 0.25), (1, 1));
+    }
+
+    #[test]
+    fn a_scale_beyond_a_device_coordinate_stops_at_the_largest_one() {
+        // The dimensions came from a file and the scale from the ladder, so
+        // a huge image at four times size would ask for coordinates an `i32`
+        // device position cannot hold. No panic, and no wrap into a negative
+        // rectangle either (§23).
+        let huge = Decoded {
+            width: u32::MAX / 4,
+            height: u32::MAX / 4,
+            pixels: Vec::new(),
+        };
+
+        assert_eq!(drawn_size(&huge, 4.0), (i32::MAX, i32::MAX));
     }
 }
