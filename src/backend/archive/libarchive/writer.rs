@@ -29,6 +29,11 @@ pub struct Writer {
 impl Writer {
     /// Open `output` for writing a 7z archive.
     pub fn seven_zip(output: PathBuf) -> Result<Self, ArchiveError> {
+        // Before any conversion: member names travel through the C locale on
+        // Linux, and a pack never builds a reader that would have pinned it
+        // for us (§22).
+        super::pin_utf8_locale();
+
         // SAFETY: `archive_write_new` returns null or a handle only
         // `archive_write_free` may take back; every early return below frees
         // it before propagating, so a failure never leaks one.

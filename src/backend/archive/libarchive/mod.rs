@@ -77,6 +77,58 @@ impl ArchiveBackend for LibarchiveBackend {
     }
 }
 
+/// Tell the C library its character set is UTF-8. Linux only.
+///
+/// libarchive converts archive entry names into the C library's current
+/// locale and reports a failure rather than mangling them — so under the `C`
+/// locale that every Rust process starts in (Rust never calls `setlocale`),
+/// a non-ASCII name is unusable. A RAR4 member with a Unicode name is what
+/// surfaced it on the read side: `Pathname cannot be converted from UTF-16BE
+/// to current locale`, returned as `ARCHIVE_WARN` from the header read and
+/// therefore indistinguishable from real damage unless the locale is fixed
+/// first. Writing met the same wall from the other direction — a 7z refuses
+/// `A filename cannot be converted to UTF-16LE` — and a directory to compress
+/// may never construct a reader at all, so both entry points call this rather
+/// than one of them depending on the other having run (§22).
+///
+/// Pinning it makes Toss behave the same on a desktop and on a server whose
+/// locale was never configured, which matters for a tool that exists to work
+/// on machines it did not set up (§2). Toss does not otherwise consult the
+/// locale: dates are printed as UTC and numbers are plain, so nothing else
+/// changes.
+///
+/// macOS and the BSDs already default to UTF-8, and Windows reaches both the
+/// file and the member name through wide entry points that never convert
+/// (§22), so neither needs a branch here — least of all one nobody can test.
+#[cfg(target_os = "linux")]
+pub(super) fn pin_utf8_locale() {
+    use std::os::raw::{c_char, c_int};
+    use std::sync::Once;
+
+    // `LC_ALL` as defined in `<locale.h>`: both glibc and musl use 6. It is
+    // not 0 here — that is `LC_CTYPE` on glibc and only `LC_ALL` under MSVC.
+    const LC_ALL: c_int = 6;
+
+    static ONCE: Once = Once::new();
+
+    unsafe extern "C" {
+        fn setlocale(category: c_int, locale: *const c_char) -> *mut c_char;
+    }
+
+    ONCE.call_once(|| {
+        // SAFETY: `c"C.UTF-8"` is a NUL-terminated literal that outlives the
+        // call, and the pointer it returns belongs to the C library, which we
+        // deliberately ignore. `setlocale` is not thread-safe by contract,
+        // and `Once` guarantees this body runs exactly once.
+        unsafe {
+            setlocale(LC_ALL, c"C.UTF-8".as_ptr());
+        }
+    });
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(super) fn pin_utf8_locale() {}
+
 #[cfg(test)]
 mod tests {
     use super::raw;
