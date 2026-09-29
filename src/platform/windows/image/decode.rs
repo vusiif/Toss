@@ -175,17 +175,18 @@ mod tests {
     /// `(name, width, height)`. The sizes are deliberately not all multiples
     /// of four, because a decoder that gets the row stride wrong still
     /// succeeds on 8x8 and only fails on 7x5.
-    const SAMPLES: [(&str, u32, u32); 5] = [
+    const SAMPLES: [(&str, u32, u32); 6] = [
         ("odd.png", 7, 5),
         ("odd.bmp", 9, 4),
         ("small.gif", 5, 3),
         ("block.jpg", 8, 8),
         ("unicode 中文 😊.png", 3, 3),
+        ("panel.png", 320, 200),
     ];
 
     /// Formats that cannot lose a pixel, so the first one can be compared
     /// exactly rather than merely being present.
-    const LOSSLESS: [&str; 3] = ["odd.png", "odd.bmp", "small.gif"];
+    const LOSSLESS: [&str; 4] = ["odd.png", "odd.bmp", "small.gif", "panel.png"];
 
     fn sample(name: &str) -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))

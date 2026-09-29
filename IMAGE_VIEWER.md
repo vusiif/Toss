@@ -294,8 +294,27 @@ exercise:
 
 - `decode(path) -> pixels + dimensions` — **no window**, runs against
   `tests/corpus/image/` in CI and proves WIC is wired correctly;
-- `run_window(...)` — cannot be automated reliably without a desktop session,
-  so it is a manual smoke test on a real Windows 10 22H2 machine.
+- the window itself — see below.
+
+**The window is measured, not eyeballed.** A separate process that has set
+its own DPI awareness can find the window by class and title, read its client
+size, read pixels back out of its device context with `GetPixel`, and post
+`WM_CLOSE` — so "is the picture actually on screen, in the right place, with
+the right colours" is an assertion rather than an opinion. M3's smoke checked
+three pixels of a gradient against the values the fixture was generated from,
+and the client rectangle against the image's own dimensions.
+
+Two traps that smoke run ran into, both worth remembering:
+
+- a **DPI-unaware** probe reads a virtualised rectangle — a 320x200 client
+  came back as 213x133 on a 150% display, which looks exactly like a sizing
+  bug and is not one. The probe must set DPI awareness before it asks;
+- `WM_CLOSE` posted from outside walks the same chain as the title-bar cross,
+  so the exit code it produces is the one a person would get.
+
+A real desktop session is still what M8 signs off: it catches what no probe
+does — a window that opens behind others, a cursor that never changes, a
+picture that is present but wrong in a way nobody thought to sample.
 
 **Linux CI** is the portability guard. It must stay green, and
 `toss <image>` there must be *defined* behaviour — exit 3,
@@ -318,7 +337,8 @@ milestone rather than accumulated:
 | before Phase 6 (`973b910`) | 664,064 | 189,952 | — |
 | M0, the boundary (`471cab1`) | 677,376 | 206,848 | +13,312 / +16,896 |
 | M1, the window (`0d78668`) | 685,056 | 206,848 | +7,680 / 0 |
-| M2, WIC decode | 691,712 | 206,848 | +6,656 / 0 |
+| M2, WIC decode (`0ea8620`) | 691,712 | 206,848 | +6,656 / 0 |
+| M3, first render | 693,248 | 206,848 | +1,536 / 0 |
 
 Plus, from the §6 spike: `windows-rs` floor **+4,096 B**, transitive crates
 **+15**.

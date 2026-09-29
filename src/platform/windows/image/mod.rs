@@ -18,13 +18,14 @@ pub fn view(request: &ViewRequest) -> Result<(), TossError> {
         return Err(TossError::other("image viewer was given no image to open"));
     };
 
-    // Decode first, so that a picture which cannot be opened never gets a
-    // window (§3: the window exists only when the operation needs one). The
-    // pixels are dropped here for now — M3 keeps them — but a successful
-    // decode is what proves the file is real before anything is drawn.
-    let _decoded = decode::decode(path)?;
+    // Decode before the window exists (§3): an image that cannot be opened
+    // needs no window at all. What comes back is pixels Toss owns — every WIC
+    // object behind it has already been released — so the renderer consumes a
+    // plain buffer and the two halves stay separable: WIC decodes, GDI
+    // renders, and neither holds the other's types (IMAGE_VIEWER.md §2).
+    let image = decode::decode(path)?;
 
-    viewer::run(request)
+    viewer::run(request, image)
 }
 
 /// Turn a `windows-rs` failure into something Toss can say (§23).

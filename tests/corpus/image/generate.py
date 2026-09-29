@@ -11,12 +11,13 @@ this script with the same Pillow version produce the same file.
 Sizes are deliberately not all multiples of four, because a decoder that gets
 the row stride wrong still succeeds on 8x8 and fails on 7x5:
 
-    odd.png        7 x 5   PNG   lossless, top-left asserted
-    odd.bmp        9 x 4   BMP   24bpp, row padded to 4 bytes, top-left asserted
-    small.gif      5 x 3   GIF   palette, top-left asserted
-    block.jpg      8 x 8   JPEG  lossy, dimensions only
-    unicode ….png  3 x 3   PNG   non-ASCII file name
-    truncated.png  —       PNG   cut mid-IDAT, must not decode
+    odd.png          7 x 5   PNG    lossless, top-left asserted
+    odd.bmp          9 x 4   BMP    24bpp, row padded to 4 bytes, top-left asserted
+    small.gif        5 x 3   GIF    palette, top-left asserted
+    block.jpg        8 x 8   JPEG   lossy, dimensions only
+    unicode ….png    3 x 3   PNG    non-ASCII file name
+    panel.png      320 x 200 PNG    the one a person can actually look at
+    truncated.png      —     PNG    header cut in half, must not decode
 """
 
 from pathlib import Path
@@ -61,6 +62,19 @@ def main() -> None:
         ROOT / "block.jpg", format="JPEG", quality=100, subsampling=0
     )
     painted((3, 3)).save(ROOT / "unicode 中文 😊.png", format="PNG")
+
+    # Big enough to look at. The samples above exist to catch stride and
+    # channel-order bugs, and a 7x5 window proves nothing to a person; this
+    # one is what a smoke test puts on screen. Red ramps left to right and
+    # green top to bottom, so a buffer drawn upside down or with its channels
+    # swapped is obvious without measuring anything.
+    panel = Image.new("RGB", (320, 200))
+    panel_pixels = panel.load()
+    for y in range(200):
+        for x in range(320):
+            panel_pixels[x, y] = (x * 255 // 319, y * 255 // 199, 128)
+    panel_pixels[0, 0] = TOP_LEFT
+    panel.save(ROOT / "panel.png", format="PNG")
 
     # Cut inside the header, not at the tail. A PNG whose IDAT merely stops
     # halfway is tolerated by WIC: it returns the rows it managed to read and
