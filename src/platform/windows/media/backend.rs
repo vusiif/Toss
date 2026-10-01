@@ -13,14 +13,15 @@
 use std::path::Path;
 use std::ptr;
 
+use windows::Win32::Foundation::HWND;
 use windows::Win32::Media::MediaFoundation::{
-    IMFMediaSession, IMFMediaSource, IMFStreamDescriptor, IMFTopology,
+    IMFMediaSession, IMFMediaSource, IMFPresentationDescriptor, IMFStreamDescriptor, IMFTopology,
     MEDIA_EVENT_GENERATOR_GET_EVENT_FLAGS, MEEndOfPresentation, MESessionClosed, MF_OBJECT_TYPE,
     MF_RESOLUTION_MEDIASOURCE, MF_TOPOLOGY_OUTPUT_NODE, MF_TOPOLOGY_SOURCESTREAM_NODE,
     MF_TOPONODE_NOSHUTDOWN_ON_REMOVE, MF_TOPONODE_PRESENTATION_DESCRIPTOR, MF_TOPONODE_SOURCE,
-    MF_TOPONODE_STREAM_DESCRIPTOR, MF_TOPONODE_STREAMID, MF_VERSION, MFCreateAudioRendererActivate,
-    MFCreateMediaSession, MFCreateSourceResolver, MFCreateTopology, MFCreateTopologyNode,
-    MFSTARTUP_FULL, MFShutdown, MFStartup,
+    MF_TOPONODE_STREAM_DESCRIPTOR, MF_VERSION, MFCreateAudioRendererActivate, MFCreateMediaSession,
+    MFCreateSourceResolver, MFCreateTopology, MFCreateTopologyNode, MFCreateVideoRendererActivate,
+    MFMediaType_Audio, MFMediaType_Video, MFSTARTUP_FULL, MFShutdown, MFStartup,
 };
 use windows::Win32::System::Com::StructuredStorage::PROPVARIANT;
 use windows::core::{IUnknown, Interface, PCWSTR};
@@ -41,32 +42,63 @@ pub(super) fn play(path: &Path) -> Result<(), TossError> {
     // failures too — spend the least, report the most).
     let source = open_source(path)?;
 
-    let session = Session::new(path)?;
-    let topology = topology(path, &source)?;
+    let (descriptor, planned) = probe(path, &source)?;
+    let has_video = planned.iter().any(|stream| stream.video);
 
-    // SAFETY: the session and topology are local values that outlive these
-    // calls, and both methods are MF's documented pairing — hand over the
-    // topology, then start from a null position, which means "from the
-    // beginning" (§18.4's "play"; the rest of the five controls are later
-    // milestones).
+    let session = Session::new(path)?;
+
+    if has_video {
+        // The video path. The window exists because the EVR needs one —
+        // `MFCreateVideoRendererActivate` takes an hwnd and there is no
+        // video without that — and the event pump runs off the window's
+        // timer, because video also needs a message pump to refresh at all.
+        // Keyboard controls are P7-C; what stops this play in the meantime
+        // is the end of the presentation or the title-bar cross.
+        let window = super::player::Window::new(path)?;
+        let topology = topology(path, &source, &descriptor, &planned, Some(window.handle()))?;
+        start(&session, path, &topology)?;
+
+        // Blocks until the window is gone — the presentation's end destroys
+        // it, and so does the cross — and surfaces any failure the event
+        // pump recorded on its way.
+        super::player::run(window, session.inner.clone(), path)?;
+
+        session.close(path)?;
+    } else {
+        // Audio only: no window at all, and the blocking pump P7-A proved.
+        // D2's "an audio file gets no dummy window" stays true by *not
+        // taking the video path*, rather than by hiding one.
+        let topology = topology(path, &source, &descriptor, &planned, None)?;
+        start(&session, path, &topology)?;
+
+        session.wait_for(path, MEEndOfPresentation.0 as u32)?;
+        session.close(path)?;
+    }
+
+    Ok(())
+}
+
+/// Hand over the topology, then start from the beginning.
+///
+/// The documented pairing: `SetTopology` resolves, `Start` begins with a
+/// null time format (MF's default) and an empty `PROPVARIANT` — VT_EMPTY,
+/// "from the current position", which for a fresh session is the start. A
+/// *null* position is refused outright (`E_POINTER`, measured in P7-A).
+fn start(session: &Session, path: &Path, topology: &IMFTopology) -> Result<(), TossError> {
+    // SAFETY: the session outlives this call and the topology is borrowed
+    // only for the hand-over MF takes a reference to; both return `Result`.
     unsafe {
         session
             .inner
-            .SetTopology(0, &topology)
+            .SetTopology(0, topology)
             .map_err(|err| super::failed(path, "prepare playback", err))?;
 
-        // An empty PROPVARIANT — VT_EMPTY — is "from the beginning", and a
-        // *null* position is refused outright (E_POINTER, measured); the
-        // time format may be null: MF's own default applies.
         let position = PROPVARIANT::default();
         session
             .inner
             .Start(ptr::null(), &position)
             .map_err(|err| super::failed(path, "start playback", err))?;
     }
-
-    session.wait_for(path, MEEndOfPresentation.0 as u32)?;
-    session.close(path)?;
 
     Ok(())
 }
@@ -248,94 +280,226 @@ fn open_source(path: &Path) -> Result<IMFMediaSource, TossError> {
         .map_err(|_| TossError::other("media foundation produced something that is not a source"))
 }
 
-/// The smallest topology that can carry a session to its end: source stream
-/// node, connected to the system's audio renderer.
+/// One stream P7-B will carry, and whether it needs the video renderer.
 ///
-/// Audio only, and deliberately so (§9): P7-A is proving lifetime, not
-/// pictures, and a video stream with no video sink would make topology
-/// resolution — and therefore this milestone's verdict — about rendering
-/// rather than about ownership. The video sink arrives with the video
-/// window, as its own milestone.
-fn topology(path: &Path, source: &IMFMediaSource) -> Result<IMFTopology, TossError> {
-    // SAFETY: everything built here is local — the topology, both nodes and
-    // the activate outlive these calls — and `source` is borrowed only for
-    // the attachments, which the topology keeps references of its own to.
-    // Every call returns a `Result`, so the only thing that can go wrong is
-    // reported through `failed` rather than left half-assembled: an error
-    // anywhere unwinds this function with nothing published to MF.
+/// Planned rather than performed: the caller decides where the video
+/// renderer's window comes from before any node is built, because a file
+/// with video in it is the whole reason a window exists (D2: an audio-only
+/// file gets no dummy window).
+pub(super) struct PlannedStream {
+    pub(super) index: u32,
+    pub(super) video: bool,
+}
+
+/// Decide which streams this file will play, and select exactly those.
+///
+/// Every stream starts deselected — including subtitle and data streams this
+/// milestone will not connect — so the topology never has a selected stream
+/// waiting for a sink nobody built. What is left selected is video and audio
+/// only, which is what `topology` then connects.
+///
+/// Returns the presentation descriptor alongside the plan: the topology
+/// needs it, and it belongs to the same decision.
+pub(super) fn probe(
+    path: &Path,
+    source: &IMFMediaSource,
+) -> Result<(IMFPresentationDescriptor, Vec<PlannedStream>), TossError> {
+    // SAFETY: `source` is a live object borrowed from the caller; every call
+    // returns a `Result`; the descriptor handed back is a referenced
+    // interface MF gives us ownership of.
+    unsafe {
+        let descriptor = source
+            .CreatePresentationDescriptor()
+            .map_err(|err| super::failed(path, "read the presentation descriptor", err))?;
+
+        let count = descriptor
+            .GetStreamDescriptorCount()
+            .map_err(|err| super::failed(path, "count the streams", err))?;
+
+        for index in 0..count {
+            descriptor
+                .DeselectStream(index)
+                .map_err(|err| super::failed(path, "clear a stream selection", err))?;
+        }
+
+        let mut planned: Vec<PlannedStream> = Vec::new();
+        for index in 0..count {
+            let stream = stream_descriptor(path, &descriptor, index)?;
+            let handler = stream
+                .GetMediaTypeHandler()
+                .map_err(|err| super::failed(path, "read a stream's media types", err))?;
+            let major = handler
+                .GetMajorType()
+                .map_err(|err| super::failed(path, "read a stream's kind", err))?;
+
+            let video = if major == MFMediaType_Video {
+                true
+            } else if major == MFMediaType_Audio {
+                false
+            } else {
+                // Subtitles, data, unknown kinds: not selected, not
+                // connected — not this milestone's problem.
+                continue;
+            };
+
+            descriptor
+                .SelectStream(index)
+                .map_err(|err| super::failed(path, "select a stream", err))?;
+            planned.push(PlannedStream { index, video });
+        }
+
+        if planned.is_empty() {
+            return Err(TossError::UnsupportedFormat(path.to_path_buf()));
+        }
+
+        Ok((descriptor, planned))
+    }
+}
+
+/// One stream's descriptor, out of the presentation descriptor.
+///
+/// Its own function because every source node needs one and MF counts the
+/// misses separately (`MF_E_TOPO_MISSING_STREAM_DESCRIPTOR`, measured in
+/// P7-A) — one place to get it right.
+pub(super) fn stream_descriptor(
+    path: &Path,
+    descriptor: &IMFPresentationDescriptor,
+    index: u32,
+) -> Result<IMFStreamDescriptor, TossError> {
+    let mut selected = windows::core::BOOL(0);
+    let mut stream: Option<IMFStreamDescriptor> = None;
+
+    // SAFETY: the descriptor is live for this call, `selected` is local
+    // storage the call fills in, and the interface comes back inside a
+    // `Result`.
+    unsafe {
+        descriptor
+            .GetStreamDescriptorByIndex(index, &mut selected, &mut stream)
+            .map_err(|err| super::failed(path, "read a stream descriptor", err))?;
+    }
+
+    stream.ok_or_else(|| TossError::other("a selected stream has no descriptor"))
+}
+
+/// The topology for the planned streams: one source node and one sink per
+/// stream, each pair connected on its own.
+///
+/// `video_window` is the EVR's target — `MFCreateVideoRendererActivate`
+/// takes an hwnd, because there is no video without a window somewhere — and
+/// the caller supplies it only for a file that actually has video, which is
+/// how an audio-only play stays windowless (D2).
+///
+/// Each source node represents *one* stream: that is MF's model, not a
+/// choice — a node carries a single stream descriptor and a single stream
+/// id, so N streams mean N nodes, all pointing at the same media source and
+/// the same presentation descriptor.
+pub(super) fn topology(
+    path: &Path,
+    source: &IMFMediaSource,
+    descriptor: &IMFPresentationDescriptor,
+    planned: &[PlannedStream],
+    video_window: Option<HWND>,
+) -> Result<IMFTopology, TossError> {
+    // SAFETY: everything built here is local — the topology and every node
+    // outlive these calls — while `source`, `descriptor` and each stream
+    // descriptor are borrowed only for attachments the topology keeps its
+    // own references to. Every call returns a `Result`, so an error anywhere
+    // unwinds with nothing published to MF.
     unsafe {
         let topology =
             MFCreateTopology().map_err(|err| super::failed(path, "create a topology", err))?;
 
-        // The source node needs the presentation descriptor as much as it
-        // needs the source itself: without it the node has nothing that says
-        // *which* streams exist, and MF refuses the topology outright with
-        // MF_E_TOPO_MISSING_PRESENTATION_DESCRIPTOR — measured, this is the
-        // first thing P7-A got wrong.
-        let descriptor = source
-            .CreatePresentationDescriptor()
-            .map_err(|err| super::failed(path, "read the presentation descriptor", err))?;
-        // The first stream: P7-A's topology carries exactly one audio
-        // stream, and *which* stream deserves to be selected for a file with
-        // several is a later milestone's decision, not this one's.
-        descriptor
-            .SelectStream(0)
-            .map_err(|err| super::failed(path, "select the first stream", err))?;
+        for stream in planned {
+            let stream_descriptor = stream_descriptor(path, descriptor, stream.index)?;
 
-        // ...and its stream descriptor: the third thing a source node
-        // cannot do without. MF counts them in order — source, presentation
-        // descriptor, stream descriptor — and answers each missing one with
-        // its own MF_E_TOPO_* (measured: 0xC00D5217, then 0xC00D5218).
-        // The selection flag is written but never read: the stream was
-        // selected a line above, and this milestone acts on exactly one.
-        let mut selected = windows::core::BOOL(0);
-        let mut stream: Option<IMFStreamDescriptor> = None;
-        descriptor
-            .GetStreamDescriptorByIndex(0, &mut selected, &mut stream)
-            .map_err(|err| super::failed(path, "read the first stream descriptor", err))?;
-        let stream = stream
-            .ok_or_else(|| TossError::other("the first stream of this file has no descriptor"))?;
+            // The stream's own first media type, offered at both ends of the
+            // connection. P7-A's single-stream topology resolved without it;
+            // a multi-track file did not (MF_E_TOPO_CODEC_NOT_FOUND, measured
+            // against tone.mp4 and probe-both.mp4) — with two streams in the
+            // source, resolution wants a preference per port pair rather than
+            // an open question at each one.
+            let handler = stream_descriptor
+                .GetMediaTypeHandler()
+                .map_err(|err| super::failed(path, "read a stream's media types", err))?;
+            let media_type = handler
+                .GetMediaTypeByIndex(0)
+                .map_err(|err| super::failed(path, "read a stream's media type", err))?;
 
-        let source_node = MFCreateTopologyNode(MF_TOPOLOGY_SOURCESTREAM_NODE)
-            .map_err(|err| super::failed(path, "create a source node", err))?;
-        source_node
-            .SetUnknown(&MF_TOPONODE_SOURCE, source)
-            .map_err(|err| super::failed(path, "attach the source to the topology", err))?;
-        source_node
-            .SetUnknown(&MF_TOPONODE_STREAM_DESCRIPTOR, &stream)
-            .map_err(|err| super::failed(path, "attach the stream descriptor", err))?;
-        source_node
-            .SetUnknown(&MF_TOPONODE_PRESENTATION_DESCRIPTOR, &descriptor)
-            .map_err(|err| super::failed(path, "attach the presentation descriptor", err))?;
-        source_node
-            .SetUINT32(&MF_TOPONODE_STREAMID, 0)
-            .map_err(|err| super::failed(path, "name the source stream", err))?;
-        topology
-            .AddNode(&source_node)
-            .map_err(|err| super::failed(path, "add the source to the topology", err))?;
+            let source_node = MFCreateTopologyNode(MF_TOPOLOGY_SOURCESTREAM_NODE)
+                .map_err(|err| super::failed(path, "create a source node", err))?;
+            source_node
+                .SetUnknown(&MF_TOPONODE_SOURCE, source)
+                .map_err(|err| super::failed(path, "attach the source", err))?;
+            source_node
+                .SetUnknown(&MF_TOPONODE_PRESENTATION_DESCRIPTOR, descriptor)
+                .map_err(|err| super::failed(path, "attach the presentation descriptor", err))?;
+            source_node
+                .SetUnknown(&MF_TOPONODE_STREAM_DESCRIPTOR, &stream_descriptor)
+                .map_err(|err| super::failed(path, "attach the stream descriptor", err))?;
+            // No MF_TOPONODE_STREAMID here, and that is the point: the
+            // official source-node set is exactly three attributes — SOURCE,
+            // PRESENTATION_DESCRIPTOR, STREAM_DESCRIPTOR ("Creating Source
+            // Nodes", Microsoft Learn) — and which stream this node stands
+            // for is already carried by the *stream descriptor*. The PD index
+            // that used to sit here was a fourth attribute nobody asked for.
+            topology
+                .AddNode(&source_node)
+                .map_err(|err| super::failed(path, "add the source to the topology", err))?;
 
-        let activate = MFCreateAudioRendererActivate()
-            .map_err(|err| super::failed(path, "reach the audio renderer", err))?;
-        let output_node = MFCreateTopologyNode(MF_TOPOLOGY_OUTPUT_NODE)
-            .map_err(|err| super::failed(path, "create an output node", err))?;
-        output_node
-            .SetObject(&activate)
-            .map_err(|err| super::failed(path, "attach the audio renderer", err))?;
-        output_node
-            .SetUINT32(&MF_TOPONODE_STREAMID, 0)
-            .map_err(|err| super::failed(path, "name the output stream", err))?;
-        // The renderer is the system's, not this topology's to shut down
-        // when a node is removed — MF's own requirement for shared sinks.
-        output_node
-            .SetUINT32(&MF_TOPONODE_NOSHUTDOWN_ON_REMOVE, 1)
-            .map_err(|err| super::failed(path, "mark the renderer as shared", err))?;
-        topology
-            .AddNode(&output_node)
-            .map_err(|err| super::failed(path, "add the renderer to the topology", err))?;
+            source_node
+                .SetOutputPrefType(0, &media_type)
+                .map_err(|err| super::failed(path, "offer the stream's media type", err))?;
 
-        source_node
-            .ConnectOutput(0, &output_node, 0)
-            .map_err(|err| super::failed(path, "connect the source to the renderer", err))?;
+            let activate = if stream.video {
+                let window = video_window.ok_or_else(|| {
+                    TossError::other("a video stream reached a topology with no window for it")
+                })?;
+                MFCreateVideoRendererActivate(window)
+                    .map_err(|err| super::failed(path, "reach the video renderer", err))?
+            } else {
+                MFCreateAudioRendererActivate()
+                    .map_err(|err| super::failed(path, "reach the audio renderer", err))?
+            };
+
+            let output_node = MFCreateTopologyNode(MF_TOPOLOGY_OUTPUT_NODE)
+                .map_err(|err| super::failed(path, "create an output node", err))?;
+            output_node
+                .SetObject(&activate)
+                .map_err(|err| super::failed(path, "attach a renderer", err))?;
+            // No MF_TOPONODE_STREAMID on the output node either — the bug
+            // this milestone spent its experiments on. On an *output* node
+            // that attribute names the *stream sink's* identifier, not the
+            // source stream's, and omitting it means "stream sink 0"
+            // ("Creating Output Nodes", Microsoft Learn). Every renderer
+            // here — EVR and the audio renderer alike — is a fixed-sink
+            // device with sink 0 only: handing it a PD index of 1 asked for
+            // a sink that does not exist, which surfaced as
+            // MF_E_STREAMSINKS_FIXED or MF_E_TOPO_CODEC_NOT_FOUND depending
+            // on the container. The experiment matrix's two "independent
+            // failure modes" were one mistake: PD index, source stream id
+            // and sink id are three numbering domains sharing one attribute
+            // name, and only the middle one belongs to a source node.
+            // The renderer belongs to the system (the video one to the
+            // window), not to this topology — MF's requirement for shared
+            // sinks, as in P7-A.
+            output_node
+                .SetUINT32(&MF_TOPONODE_NOSHUTDOWN_ON_REMOVE, 1)
+                .map_err(|err| super::failed(path, "mark the renderer as shared", err))?;
+            topology
+                .AddNode(&output_node)
+                .map_err(|err| super::failed(path, "add the renderer to the topology", err))?;
+
+            output_node
+                .SetInputPrefType(0, &media_type)
+                .map_err(|err| super::failed(path, "state the renderer's input type", err))?;
+
+            // Port 0 on both ends: this source node *is* one stream, so its
+            // only output is that stream, and the sink's only input is the
+            // one it was built for.
+            source_node
+                .ConnectOutput(0, &output_node, 0)
+                .map_err(|err| super::failed(path, "connect a stream to its renderer", err))?;
+        }
 
         Ok(topology)
     }

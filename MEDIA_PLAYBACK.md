@@ -408,6 +408,72 @@ Toss.
 
 ---
 
+
+**P7-B complete (2026-10-01).** The video path, measured on the floor
+machine:
+
+```text
+8 of 8 corpus formats play to the end, exit 0    (wav mp3 flac mp4 mkv webm avi mov)
+truncated.mp4                                    exit 6, while opening
+video window appears, EVR paints                  6/6 sampled pixels non-black
+audio-only files                                  still windowless (D2) — P7-A's
+                                                  blocking pump, unchanged
+```
+
+### The lesson: three numbering domains, one attribute name
+
+P7-B spent most of its experiments on a bug that presented as *two*
+independent failures — `MF_E_STREAMSINKS_FIXED` on one container,
+`MF_E_TOPO_CODEC_NOT_FOUND` on another — and was neither:
+
+```text
+MF_TOPONODE_STREAMID on a SOURCE node
+    = which stream of the source this node stands for (a PD index)
+MF_TOPONODE_STREAMID on an OUTPUT node
+    = which stream sink of the *renderer* — default 0 when omitted
+source stream identifier (IMFStreamDescriptor::GetStreamIdentifier)
+    = something else again, and belongs to nobody's node
+```
+
+The code set the **PD index on both node kinds**. Renderers here (EVR, the
+audio renderer) are fixed-sink devices with **sink 0 only**, so any branch
+whose stream happened to sit at PD index 1 — which for MP4 on this machine
+means the *video* stream, because MF enumerates MP4 as audio-first while
+ffprobe reports container order — asked for a sink that does not exist. The
+two "modes" were the two containers' different stream orders hitting the same
+mistake.
+
+Verified against Microsoft's own sample
+(`Windows-classic-samples/.../protectedplayback/Player.cpp`) and the
+"Creating Source Nodes" / "Creating Output Nodes" pages: the official
+source node sets **exactly three** attributes (SOURCE, PD, SD), and the
+official output node **never writes a stream id at all** — its
+`GetStreamIdentifier` call exists *"just for debugging"*, and the omitted
+attribute means sink 0. After deleting both writes, every format above went
+green at once.
+
+Also worth keeping: **`MF_E_STREAMSINKS_FIXED` (0xC00D4A3B)** is the
+sink-side complaint ("these stream sinks are fixed, do not add or remove
+them") — when a topology asks a fixed sink for a stream it does not have,
+this is what it says.
+
+### Choices inside P7-B, stated once
+
+- **The event pump is a timer + `GetEvent(MF_EVENT_FLAG_NO_WAIT)`** on the
+  window's thread, not the `BeginGetEvent` callback the Microsoft sample
+  uses: video needs a message pump to repaint at all, and a pump that blocks
+  on MF events cannot repaint. One thread, no cross-thread marshalling, and
+  every event still consumed — at worst 50 ms late, which no one can see.
+- **The window is 640x480 and the frame is letterboxed into it.** Reading
+  `MF_MT_FRAME_SIZE` is a packed two-value attribute this milestone chose not
+  to risk; fitting the window to the frame (and fullscreen) is P7-C/D work.
+  Observed: the client rect came back 412x282 on one run rather than the
+  requested size — recorded here rather than explained, to be looked at when
+  window sizing becomes a real concern.
+- **Audio stays on P7-A's blocking pump with no window** — D2 by
+  *construction*, not by hiding a window that exists.
+---
+
 ## 10. Non-goals
 
 Repeated because they are what gets added "while we are in here":

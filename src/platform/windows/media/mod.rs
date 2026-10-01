@@ -6,6 +6,7 @@
 //! behind the wrapper, and every `unsafe` of the phase lives there).
 
 mod backend;
+mod player;
 
 use std::path::Path;
 
@@ -26,6 +27,20 @@ pub fn play(path: &Path) -> Result<(), TossError> {
 /// A `windows-rs` failure, classified the same way an HRESULT from the event
 /// pump is (`from_hresult`) — there is one rule for "MF said no", whether it
 /// said it while opening or while playing (§23).
+/// The current instance, as an `HINSTANCE` window creation wants.
+///
+/// Failures name the file being played because that is the operation that
+/// was under way — the same wording the viewer uses for the same call.
+fn module(path: &Path) -> Result<windows::Win32::Foundation::HINSTANCE, TossError> {
+    use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+
+    // SAFETY: a null module name asks for the calling process, which always
+    // has one.
+    let handle =
+        unsafe { GetModuleHandleW(None) }.map_err(|err| failed(path, "find itself", err))?;
+
+    Ok(windows::Win32::Foundation::HINSTANCE(handle.0))
+}
 fn failed(path: &Path, step: &str, err: Error) -> TossError {
     from_hresult(path, step, err.code())
 }
