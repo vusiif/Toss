@@ -17,18 +17,19 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
 };
+use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
 use windows::Win32::UI::WindowsAndMessaging::{
     AdjustWindowRectEx, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW,
-    DispatchMessageW, GWLP_USERDATA, GetMessageW, GetWindowLongPtrW, IDC_ARROW, LoadCursorW, MSG,
-    PostQuitMessage, RegisterClassExW, SW_SHOW, SetWindowLongPtrW, ShowWindow, TranslateMessage,
-    WM_DESTROY, WM_MOUSEWHEEL, WM_NCDESTROY, WM_PAINT, WNDCLASS_STYLES, WNDCLASSEXW,
-    WS_OVERLAPPEDWINDOW,
+    DispatchMessageW, GWLP_USERDATA, GetClientRect, GetMessageW, GetWindowLongPtrW, IDC_ARROW,
+    LoadCursorW, MSG, PostQuitMessage, RegisterClassExW, SW_SHOW, SetWindowLongPtrW, ShowWindow,
+    TranslateMessage, WM_CAPTURECHANGED, WM_DESTROY, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+    WM_MOUSEWHEEL, WM_NCDESTROY, WM_PAINT, WNDCLASS_STYLES, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
 };
 use windows::core::{HSTRING, PCWSTR, w};
 
 use super::decode::Decoded;
 use crate::core::error::TossError;
-use crate::platform::image::{ViewRequest, zoom};
+use crate::platform::image::{ViewRequest, pan, zoom};
 
 /// Class name for every window this process creates.
 const CLASS_NAME: PCWSTR = w!("TossImageViewer");
@@ -41,12 +42,36 @@ const CLASS_NAME: PCWSTR = w!("TossImageViewer");
 /// the loop failing, the window closing — all reduce to "one box, one drop".
 ///
 /// `zoom` is the *cursor* into the ladder Toss defines (`platform::image`);
-/// the ladder itself is a rule and does not live here. That is the split
-/// `IMAGE_VIEWER.md` §4 draws: the wheel event belongs to this half, the
-/// levels it moves between do not.
+/// the ladder itself is a rule and does not live here. `origin` is the cursor
+/// into the legal range Toss defines for panning; the range itself is a rule
+/// and does not live here either. That is the split `IMAGE_VIEWER.md` §4
+/// draws: the wheel and the mouse belong to this half, the levels and the
+/// edges they move between do not.
 struct ViewerState {
     image: Decoded,
     zoom: usize,
+    /// Where the picture's top-left corner sits in client coordinates.
+    /// Zero at start and whenever the picture fits; the range it is allowed
+    /// to reach is `pan::clamp`'s answer, not this struct's guess.
+    origin: (i32, i32),
+    /// Present only while the left button is held. The single source of truth
+    /// for "a drag is happening": `SetCapture` is what makes the moves arrive,
+    /// but this is what decides they mean anything.
+    drag: Option<Drag>,
+}
+
+/// One drag in progress: where the button went down, and where the picture
+/// was at that moment.
+///
+/// Both ends are kept rather than only the starting point, so a move is the
+/// distance travelled added to where the drag *began*. Recomputing from the
+/// previous message instead would drift by whatever the queue dropped
+/// between two mouse moves — the picture would slip away from under the
+/// cursor instead of staying pinned to it.
+#[derive(Clone, Copy)]
+struct Drag {
+    at: (i32, i32),
+    origin: (i32, i32),
 }
 
 /// Show `image` in a native window and run until it closes.
@@ -74,6 +99,8 @@ pub fn run(request: &ViewRequest, image: Decoded) -> Result<(), TossError> {
     let state = Box::new(ViewerState {
         image,
         zoom: zoom::START,
+        origin: (0, 0),
+        drag: None,
     });
     let (width, height) = outer_size(&state.image)?;
 
@@ -329,12 +356,100 @@ unsafe extern "system" fn window_proc(
                 if next != state.zoom {
                     state.zoom = next;
 
+                    // The ladder moved, so the range the origin was clamped
+                    // into moved with it: shrinking can leave the picture
+                    // smaller than the position it was dragged to, and the
+                    // edge the window would then show is background. Read it
+                    // back against the size it has *now*, before anything
+                    // paints.
+                    let content = drawn_size(&state.image, zoom::factor(state.zoom));
+                    state.origin = pan::clamp(state.origin, content, client_size(window));
+
                     // SAFETY: the window is live; a null rectangle means the
                     // whole client area, which is exactly what a zoom
                     // changes — and the erase flag clears what the smaller
                     // picture no longer covers.
                     let _ = InvalidateRect(Some(window), None, true);
                 }
+
+                LRESULT(0)
+            }
+
+            WM_LBUTTONDOWN if slot != 0 => {
+                let state = &mut *(slot as *mut ViewerState);
+
+                // Both halves are read now rather than at the first move: a
+                // drag is measured from where the button went down, so a
+                // queue that coalesces the first few moves cannot lose them.
+                state.drag = Some(Drag {
+                    at: point_of(lparam),
+                    origin: state.origin,
+                });
+
+                // The mouse is captured so the moves — and the release —
+                // keep arriving even when the cursor leaves the window. That
+                // is the whole difference between a drag that follows the
+                // picture past the edge and one that silently stops at it.
+                //
+                // SAFETY: `window` is the window this message was delivered
+                // to, so it is live; the return is the window that held the
+                // mouse before this call, which nothing here has a use for.
+                let _ = SetCapture(window);
+
+                LRESULT(0)
+            }
+
+            WM_MOUSEMOVE if slot != 0 => {
+                let state = &mut *(slot as *mut ViewerState);
+
+                // Not every move is a drag — the mouse also just travels
+                // over the window — and a move without a button held has
+                // nothing to add to the origin.
+                let Some(drag) = state.drag else {
+                    return LRESULT(0);
+                };
+
+                let cursor = point_of(lparam);
+                let delta = (cursor.0 - drag.at.0, cursor.1 - drag.at.1);
+                let content = drawn_size(&state.image, zoom::factor(state.zoom));
+                let next = pan::dragged(drag.origin, delta, content, client_size(window));
+
+                if next != state.origin {
+                    state.origin = next;
+
+                    // SAFETY: the window is live and the rectangle is null
+                    // for the whole client area, which is what a drag can
+                    // touch anywhere. The erase flag is kept from the zoom
+                    // path deliberately: an origin can move a picture that
+                    // did not fill the window, and the strip it leaves
+                    // behind has to be cleared rather than smeared.
+                    let _ = InvalidateRect(Some(window), None, true);
+                }
+
+                LRESULT(0)
+            }
+
+            WM_LBUTTONUP if slot != 0 => {
+                let state = &mut *(slot as *mut ViewerState);
+                state.drag = None;
+
+                // SAFETY: this releases whatever the calling thread has
+                // captured — the same thread the `SetCapture` above runs
+                // on — and releasing a mouse nobody holds is a documented
+                // no-op rather than an error.
+                let _ = ReleaseCapture();
+
+                LRESULT(0)
+            }
+
+            WM_CAPTURECHANGED if slot != 0 => {
+                // The mouse was taken away — another window, a modal dialog,
+                // the system on Alt+Tab. The drag is over whether or not a
+                // button-up ever arrives, and leaving the state set would
+                // make the *next* move over this window drag the picture
+                // with no button held at all.
+                let state = &mut *(slot as *mut ViewerState);
+                state.drag = None;
 
                 LRESULT(0)
             }
@@ -353,14 +468,15 @@ unsafe extern "system" fn window_proc(
     }
 }
 
-/// Draw `state`'s pixels into `dc` at the current zoom, anchored at the top
-/// left.
+/// Draw `state`'s pixels into `dc` at the current zoom and pan origin.
 ///
 /// The *source* rectangle is always the whole image and the *destination* is
-/// its scaled size, which is the whole of what zooming is here: GDI does the
-/// interpolation, Toss supplies the ladder. Content past the client edge is
-/// clipped — panning is M5, and inventing a viewport now would be the §42
-/// abstraction this milestone is supposed to avoid.
+/// its scaled size starting at the origin — which is the whole of what
+/// zooming and panning are here: GDI does the interpolation, Toss supplies
+/// the ladder and the edges. Content past the client edge is clipped by the
+/// device context, so an origin of zero is M3's picture exactly, and a
+/// negative one is that same picture slid under the window's corner with
+/// nothing but the frame of the window hiding what went past.
 fn render(state: &ViewerState, dc: HDC) {
     let image = &state.image;
     let source = (image.width as i32, image.height as i32);
@@ -378,8 +494,8 @@ fn render(state: &ViewerState, dc: HDC) {
         // swallowed return code.
         let _ = StretchDIBits(
             dc,
-            0,
-            0,
+            state.origin.0,
+            state.origin.1,
             destination.0,
             destination.1,
             0,
@@ -392,6 +508,40 @@ fn render(state: &ViewerState, dc: HDC) {
             SRCCOPY,
         );
     }
+}
+
+/// The client-space point a mouse message carries in `lparam`.
+///
+/// The coordinates travel in the low half as an x and the next half as a y,
+/// each a *signed* 16-bit value: a drag to the left of the origin is
+/// negative, and reading either word as unsigned turns it into a point tens
+/// of thousands of pixels away — which is how a picture jumps off to the
+/// right the first time someone drags it left.
+fn point_of(lparam: LPARAM) -> (i32, i32) {
+    (
+        lparam.0 as u16 as i16 as i32,
+        (lparam.0 >> 16) as u16 as i16 as i32,
+    )
+}
+
+/// The window's client size, in pixels, as the picture's legal range needs
+/// it.
+///
+/// Asked at the moment a drag or a zoom needs it rather than cached, because
+/// the window can be resized between two events and a stale viewport would
+/// settle the origin somewhere the current one does not allow. A failed call
+/// leaves the rectangle at zero, which clamps the origin to nothing to pan —
+/// the safe direction, rather than a panic (§23).
+fn client_size(window: HWND) -> (i32, i32) {
+    let mut rect = RECT::default();
+
+    // SAFETY: `rect` is writable storage the call fills in, and `window` is
+    // the live window the message this is being answered for arrived for.
+    unsafe {
+        let _ = GetClientRect(window, &mut rect);
+    }
+
+    (rect.right - rect.left, rect.bottom - rect.top)
 }
 
 /// The size an image is drawn at, in client pixels.
@@ -446,10 +596,12 @@ mod tests {
     use std::mem::size_of;
     use std::path::{Path, PathBuf};
 
+    use windows::Win32::Foundation::LPARAM;
     use windows::Win32::Graphics::Gdi::BITMAPINFOHEADER;
 
     use super::super::decode::{Decoded, decode};
-    use super::{bitmap_info, drawn_size, outer_size};
+    use super::{bitmap_info, drawn_size, outer_size, point_of};
+    use crate::platform::image::{pan, zoom};
 
     fn sample(name: &str) -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -514,7 +666,8 @@ mod tests {
     fn zooming_scales_the_destination_and_leaves_the_source_alone() {
         // The whole of what a zoom is: the destination rectangle moves and
         // the source stays the whole image, so nothing is cropped before GDI
-        // sees it — cropping at the client edge is panning's problem (M5).
+        // sees it — cropping at the client edge is panning's rule to decide
+        // (M5), and this test is about neither.
         let image = decode(&sample("odd.png")).expect("the sample decodes");
 
         assert_eq!(
@@ -528,6 +681,51 @@ mod tests {
             "7*0.25 rounds to 2, 5*0.25 rounds to 1"
         );
         assert_eq!(drawn_size(&image, 4.0), (28, 20));
+    }
+
+    #[test]
+    fn the_limit_the_rule_allows_is_where_the_picture_edge_lands() {
+        // Two halves that have to agree: `pan::clamp` decides how far the
+        // origin may travel, and `drawn_size` is what produced the content
+        // size it is handed. If they ever disagree about that size, the
+        // limit either stops short — a strip of picture nobody can reach —
+        // or runs past it and shows background behind the edge.
+        //
+        // At the default level of the larger sample: 320x200 of picture in a
+        // 40x30 window, so 280x170 of travel.
+        let image = decode(&sample("panel.png")).expect("the sample decodes");
+        let content = drawn_size(&image, zoom::factor(zoom::START));
+        let viewport = (40, 30);
+
+        assert_eq!(content, (320, 200), "the sample's own size at 1:1");
+
+        let origin = pan::clamp((-10_000, -10_000), content, viewport);
+
+        assert_eq!(
+            origin,
+            (viewport.0 - content.0, viewport.1 - content.1),
+            "the far edge of the picture has to land exactly on the far edge of the window"
+        );
+        assert_eq!(origin.0 + content.0, viewport.0, "x: edge meets edge");
+        assert_eq!(origin.1 + content.1, viewport.1, "y: edge meets edge");
+    }
+
+    #[test]
+    fn a_mouse_message_carries_signed_client_coordinates() {
+        // Both halves of `lparam` are signed 16-bit positions, and getting
+        // the packing wrong is invisible until someone drags left of the
+        // origin: read as unsigned, -5 becomes 65531 and the picture jumps
+        // off the right-hand side of the screen.
+        let pack = |x: i16, y: i16| LPARAM((x as u16 as isize) | ((y as u16 as isize) << 16));
+
+        assert_eq!(point_of(pack(0, 0)), (0, 0));
+        assert_eq!(point_of(pack(300, 200)), (300, 200));
+        assert_eq!(
+            point_of(pack(-5, -7)),
+            (-5, -7),
+            "up and to the left of the client origin stays negative"
+        );
+        assert_eq!(point_of(pack(7, -1)), (7, -1));
     }
 
     #[test]

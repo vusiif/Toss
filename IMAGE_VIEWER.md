@@ -208,7 +208,36 @@ ABI correctness.
 
 The constraint that comes with the decision: **only enable the `windows-rs`
 features Phase 6 actually uses. Do not widen the Windows API surface for
-convenience.**
+convenience.** That makes this list part of the dependency closure (§11), so
+each addition is a fresh decision rather than a line edit.
+
+### Feature-set changes during Phase 6 — each one recorded
+
+**M5 added `Win32_UI_Input_KeyboardAndMouse`, for `SetCapture` /
+`ReleaseCapture`.** A drag must keep following the pointer once it leaves the
+client area, and the button-up must arrive wherever it happens; polling
+`MK_LBUTTON` instead would change behaviour at exactly that boundary, which
+is a worse trade than the feature costs. Accepted with the evidence measured
+at the time:
+
+```text
+new crates                 0
+Cargo.lock delta           0
+dependency closure         still 15 crates
+build without `image`      +0 B   (206,848 B, unchanged)
+--all-features             694,272 → 695,808 B  (+1,536 B for all of M5)
+Windows floor              SetCapture/ReleaseCapture are Windows 2000/NT
+                           era calls — far under the 19045 floor
+capability bought          reliable drag with the pointer outside the window
+```
+
+The capture calls stay in the Windows backend; `platform::image::pan` is
+given only numbers (origin, delta, content, viewport) and knows nothing about
+a grab. A future backend uses its own pointer-grab mechanism to satisfy the
+same rule. **Do not "clean up" this feature as unused-looking** — the only
+callers are the `WM_LBUTTONDOWN` / `WM_LBUTTONUP` arms of the viewer, which
+`cfg` hides from every build that has no viewer in it.
+
 
 ### Gates checked at decision time — all measured, none assumed
 
@@ -312,6 +341,26 @@ Two traps that smoke run ran into, both worth remembering:
 - `WM_CLOSE` posted from outside walks the same chain as the title-bar cross,
   so the exit code it produces is the one a person would get.
 
+M5's drag smoke added two more, and they are the ones a later probe will hit
+first:
+
+- **`FindWindowW` returned NULL for a window `EnumWindows` could see** —
+  same class, same session, visible, with `MainWindowHandle` populated. The
+  probe now enumerates and matches on **pid + class name**, which also stops
+  an older viewer still on screen from answering for this one;
+- **`GetPixel` lives in `gdi32.dll`, not `user32.dll`** — declaring it
+  against user32 compiles and then fails at run time with
+  `EntryPointNotFoundException`.
+
+M5's assertions, in the order they ran: the client rectangle is the image's
+own size; the picture reads back at 1:1; **a drag at 1:1 moves nothing** (no
+room to pan, so the rule refuses it); the anchor survives two zooms (M4
+unchanged); a drag inside the range moves the picture — reading back
+`(9, 8, 128)`, the gradient value `panel.png` has at the source pixel that
+origin lands on; a drag far past the edge and a second one past it land in
+the **same** place, which is the clamp; zooming out brings the picture home;
+exit 0.
+
 A real desktop session is still what M8 signs off: it catches what no probe
 does — a window that opens behind others, a cursor that never changes, a
 picture that is present but wrong in a way nobody thought to sample.
@@ -340,6 +389,7 @@ milestone rather than accumulated:
 | M2, WIC decode (`0ea8620`) | 691,712 | 206,848 | +6,656 / 0 |
 | M3, first render | 693,248 | 206,848 | +1,536 / 0 |
 | M4, zoom | 694,272 | 206,848 | +1,024 / 0 |
+| M5, pan | 695,808 | 206,848 | +1,536 / 0 |
 
 Plus, from the §6 spike: `windows-rs` floor **+4,096 B**, transitive crates
 **+15**.
