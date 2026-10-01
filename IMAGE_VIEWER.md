@@ -630,6 +630,19 @@ Rules it follows, each one a constraint that already existed elsewhere:
   from `cmd` or PowerShell print identically: no launch detection, no
   branching on where the console came from. The shell case keeps waiting for
   Toss and reading its exit code — §6's measured reason for staying CUI.
+- **Browsing appends; it does not rewrite.** Every arrow step adds one line
+  — `→ name (format, dimensions, size)` — built from the same four facts as
+  the header, after the window has already moved:
+
+  ```text
+  → small.gif (GIF, 5 × 3, 51 bytes)
+  → unicode ….png (PNG, 3 × 3, 85 bytes)
+  ```
+
+  The controls are printed once because arrows do not change them; the
+  terminal grows the way a log does, so "what is on screen now" is the last
+  line and everything above it is how the session got there. A step that
+  decodes nothing prints nothing, because nothing changed.
 
 On the dropped-file path the console closes with the process; on the shell
 path it was the user's terminal all along. Neither case is special-cased,

@@ -30,6 +30,7 @@ use windows::core::{HSTRING, PCWSTR, w};
 
 use super::decode::Decoded;
 use crate::core::error::TossError;
+use crate::core::log;
 use crate::platform::image::{ViewRequest, nav, pan, zoom};
 
 /// Class name for every window this process creates.
@@ -537,14 +538,14 @@ fn browse(state: &mut ViewerState, window: HWND, forward: bool) {
             break;
         };
         if let Ok(image) = super::decode::decode(&path) {
-            opened = Some((candidate, image));
+            opened = Some((candidate, path, image));
             break;
         }
     }
 
     // Nothing else in the set will open: keep showing what is already on
     // screen rather than replacing it with nothing.
-    let Some((index, image)) = opened else {
+    let Some((index, path, image)) = opened else {
         return;
     };
 
@@ -585,6 +586,14 @@ fn browse(state: &mut ViewerState, window: HWND, forward: bool) {
     unsafe {
         let _ = InvalidateRect(Some(window), None, true);
     }
+
+    // The console follows the picture: one line for the step just taken, so
+    // the terminal says what is on screen now instead of what the session
+    // opened on (§12). Appended, never rewritten — the controls were printed
+    // once and arrows do not change them — and after the window has been
+    // told, so the line reports something already true.
+    let bytes = std::fs::metadata(&path).ok().map(|meta| meta.len());
+    log::out(&super::announce(&path, &state.image, bytes));
 }
 
 /// Draw `state`'s pixels into `dc` at the current zoom and pan origin.
