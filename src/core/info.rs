@@ -85,11 +85,18 @@ fn push(text: &mut String, label: &str, value: &str) {
 
 /// Render an exact byte count alongside a readable unit.
 ///
+/// A byte count as one display line: `747 bytes`, or `9175040 bytes
+/// (8.7 MiB)` once there is a unit worth using.
+///
+/// Shared with the summary the image viewer prints beside its window, so a
+/// size looks the same whether it comes from the info fallback or from
+/// looking at a picture (§25: one product, one voice).
+///
 /// The decimal is computed with integer arithmetic on purpose. Formatting a
 /// float here would link Rust's entire float-to-decimal machinery into the
 /// binary for one display line — measured at 22,528 bytes, and §2 ranks
 /// binary size above feature count.
-fn human_size(bytes: u64) -> String {
+pub fn human_size(bytes: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
 
     if bytes < 1024 {

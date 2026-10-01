@@ -229,24 +229,25 @@ each addition is a fresh decision rather than a line edit.
 
 ### Feature-set changes during Phase 6 — each one recorded
 
-**M8 added `Win32_System_Console`, for `GetConsoleProcessList` /
-`GetConsoleWindow`.** Dropping an image on `toss.exe` starts a console
-application, so Windows hands it a console window nobody asked for; the fix
-hides that window **when Toss is the only process attached to the console**
-— and only then, because a console a shell is also attached to is the
-user's terminal, not Toss's to take. Accepted on the evidence measured at
-the time:
+**M8 added `Win32_System_Console` — and then removed it. Both halves are
+recorded, because each half is worth not repeating.**
 
-```text
-new crates                 0
-Cargo.lock delta           0
-dependency closure         still 15 crates
-binary                     700,928 B, unchanged
-capability bought          no stray console behind the viewer
-```
+The addition was for `GetConsoleProcessList` / `GetConsoleWindow`, hiding the
+console Windows creates when an image is dropped on `toss.exe` — under the
+condition *Toss is the only process attached to the console*, a fact about
+the console rather than any claim about how Toss was started. Measured at
+the time: **0 new crates, `Cargo.lock` unchanged, closure still 15 crates,
+binary unchanged at 700,928 B.**
 
-Three alternatives were measured or argued down, and the record is kept
-because each could plausibly be proposed again:
+It was withdrawn after a real-machine sitting showed what that approach
+could not fix: the console window exists before Rust's `main()` runs, so
+hiding it afterwards is a **visible flash** — trading a console nobody
+wanted for a black frame nobody wanted. The console has stopped being
+something to suppress; §12 records what it became instead. The feature is
+back out of `Cargo.toml` and so is every call site.
+
+Two alternatives were rejected earlier in the same session, and both
+rejections stand regardless of §12:
 
 - **`#![windows_subsystem = "windows"]` was built and rejected.** A GUI
   subsystem *would* remove the console outright, but it changes what shells
@@ -255,30 +256,19 @@ because each could plausibly be proposed again:
   `cmd` behaves the same way. §24 exists so scripts can rely on Toss's exit
   code, and that contract is worth more than a window that never appears.
   **Toss is a console application that enters a GUI on demand**, not a GUI
-  application that happens to print.
-- **Hand-writing `extern "system"` for the two calls was rejected.** The ABI
-  risk is near zero — no vtable slots, two plain functions — but the
+  application that happens to print — and that is why the subsystem is still
+  CUI.
+- **Hand-writing `extern "system"` for the console calls was rejected.** The
+  ABI risk is near zero — no vtable slots, two plain functions — but the
   precedent is not: *"windows-rs is the raw declaration layer"* (§7) stops
   being a rule the moment *"except when the function is simple enough"* is
   allowed to carve out from it. Feature count is not a product metric;
   dependency closure, binary cost and one consistent rule are.
-- **Hiding at start-up was rejected.** The check lives on the viewer path,
-  after the decode succeeds and before the window is created — so a bad
-  command line, a corrupt image, or any CLI verb still has the console the
-  user was given to print its error on. "Whether to hide the console" is
-  image-viewer presentation policy, not process start-up policy; a Phase 7
-  player that wants the same treatment should be what prompts any
-  generalisation, not this.
 
-The condition is stated as a fact about the console — *Toss is the only
-process attached to it* — and not as a detector for how Toss was started.
-The second is an inference the API does not provide, and the contract is
-kept to what the API actually says.
-
-What this does **not** promise: the console window is created before Rust's
-`main()` runs, so a brief flash on launch is possible and is not treated as
-a defect to eliminate — only a persistent console behind the viewer is. The
-real-machine observation belongs to M8 and is recorded in §8.
+A third idea — hiding at start-up rather than on the viewer path — fell with
+the approach itself, but the point it made survives: console presentation is
+image-viewer policy, never process start-up policy, so a bad command line or
+a corrupt image always still has the console to report on.
 
 ### Feature-set changes during Phase 6 — each one recorded
 
@@ -480,8 +470,8 @@ zoom path keeps its erase for a real reason (shrinking leaves pixels nobody
 covers), so the fix is per-path, not global. A `GetPixel` probe cannot see
 this: it reads the *result*, and the result was always correct.
 
-**The console contract, checked with numbers** (the console fix in §6 — three
-of the four checks run on their own, the fourth is a person):
+**The console contract, checked with numbers** (three of the four checks run
+on their own, the fourth is a person):
 
 ```text
 PowerShell   & toss panel.png     waited 1,689 ms for the viewer to close,
@@ -489,10 +479,10 @@ PowerShell   & toss panel.png     waited 1,689 ms for the viewer to close,
 cmd          toss panel.png       waited 1,651 ms,
                                   %ERRORLEVEL% = 0 (AFTER=0)
 CI replay    2>&1 >/dev/null      exit=2, stderr='Error: invalid arguments: ...'
-Explorer     drag an image in     ← the one only a person can answer:
-                                  no persistent console, and whether the
-                                  launch flashes briefly (§6 says flash is
-                                  possible and is not a defect to remove)
+Explorer     drag an image in     ← only a person: the summary of §12 appears
+                                  above the viewer and nothing else does;
+                                  judge the presentation (§6 records why
+                                  the console is kept rather than hidden)
 ```
 
 The first two are the point of keeping the CUI subsystem: a shell waits for
@@ -500,6 +490,13 @@ Toss and reads its exit code. They are also the two a `windows` subsystem
 build fails (§6), so if either number ever comes back as "returned
 immediately" or an empty exit code, the subsystem is no longer CUI and §24
 has been broken.
+
+The third is the CLI half of the contract; the §12 summary was checked
+separately for its half — redirected to a file, its bytes are UTF-8
+(`E2 80 94` for the dash in the heading, `C3 97` for the multiplication
+sign), so a script reads plain text and a real console, which `windows-rs`
+writes through `WriteConsoleW`, shows the same characters. A mojibake seen
+in a tool that re-encodes along the way is the tool, not Toss.
 
 **Linux CI** is the portability guard. It must stay green, and
 `toss <image>` there must be *defined* behaviour — exit 3,
@@ -528,6 +525,13 @@ milestone rather than accumulated:
 | M5, pan | 695,808 | 206,848 | +1,536 / 0 |
 | M6, previous / next | 698,880 | 206,848 | +3,072 / 0 |
 | M7, error handling | 700,928 | 206,848 | +2,048 / 0 |
+| M8, the console beside the window | 708,096 | 206,848 | +7,168 / 0 |
+
+M8's row is the `summary` of §12 and its fields — a format name, a byte
+count and four lines of controls. The drag-flicker fix in the same milestone
+moved nothing, and the console-hiding experiment (§6) that was built and
+withdrawn inside it is why the row after M7 is +7,168 rather than two
+changes stacked.
 
 Plus, from the §6 spike: `windows-rs` floor **+4,096 B**, transitive crates
 **+15**.
@@ -575,3 +579,58 @@ the Windows 19045 floor     (an API whose minimum supported client is higher)
 
 Implementation detail inside those lines does not need another round of
 discussion.
+
+---
+
+## 12. The console beside the window
+
+**The terminal is not a side effect to suppress; it is the textual half of
+the viewer.** The window carries the pixels, the console carries the facts
+and the controls — each doing what it is good at. That is the settled answer
+to "a dropped image opens a console nobody asked for": not hiding it (§6
+records why that flashed), not becoming a GUI application (§6 records why
+that broke §24), but giving the console something worth showing.
+
+```text
+Toss — Image Viewer
+
+File        panel.png
+Format      PNG
+Dimensions  320 × 200
+Size        747 bytes
+
+Controls
+  Wheel       Zoom
+  Left drag   Pan
+  Left/Right  Previous / next image
+  Alt+F4      Close
+```
+
+Rules it follows, each one a constraint that already existed elsewhere:
+
+- **Printed once, as ordinary stdout.** No clearing, no cursor addressing,
+  no redrawing, no status line — and no terminal library. A redirect or a
+  script reads plain text (§25), so there is only ever one interaction
+  model. The print happens after the decode succeeds and before the message
+  loop takes the thread, which is also why a failure *before* that line — a
+  corrupt image, a bad command line — still reports on the console the user
+  was given.
+- **Only what Toss already knows.** The name from the path, the format from
+  the extension that classified the file (§6.2: reporting a decision, not
+  running a second detector), the dimensions from the decoder that just ran,
+  the size from metadata. Bit depth, colour space, alpha and EXIF arrive
+  when image metadata becomes a Toss capability of its own, not to fill a
+  screen (`Toss_AGENTS.md` §40).
+- **Only controls that work.** §10 forbids advertising what is not built,
+  and a console the user reads is a README: `Fit`, actual size and Esc are
+  not printed because they do not exist yet, and a test asserts their
+  absence — so implementing one later is a deliberate act rather than an
+  oversight.
+- **The same text everywhere.** Dropping a file on `toss.exe` and running it
+  from `cmd` or PowerShell print identically: no launch detection, no
+  branching on where the console came from. The shell case keeps waiting for
+  Toss and reading its exit code — §6's measured reason for staying CUI.
+
+On the dropped-file path the console closes with the process; on the shell
+path it was the user's terminal all along. Neither case is special-cased,
+which is the whole point.
