@@ -183,13 +183,17 @@ touching this code:
   panic and any overflow in `i + n` without a branch at every caller — one
   forgotten `if` is all "guarded at the call site" needs to become a panic on
   something the user can influence (`Toss_AGENTS.md` §23).
-- **A picture that will not decode blocks the direction it sits in.** `next`
-  and `previous` are pure; *stepping onto* a picture means decoding it, and
-  until M7 exists a failure leaves the viewer where it is. Walking right into
-  `truncated.png` therefore stays put on every press — correct for now (no
-  panic, no closed window, no good picture replaced by a broken one) and
-  explicitly **not** the finished behaviour: skipping it or reporting it is
-  part of M7's error handling, which is where the decision belongs.
+- **A picture that will not decode is stepped over, not stopped at (M7).**
+  `nav::attempts` gives the order — every other image in the set, once each,
+  wrapping once, never back to where the step started — and the viewer takes
+  the first one that decodes. The distinction that decides this: an image
+  that fails **before any window exists** is the file the person asked for,
+  so it is reported (§24's 6) and nothing opens; an image that fails **in the
+  middle of a set they are browsing** is a detour, so the answer to "next
+  picture" is the next picture that opens. A set where nothing else opens
+  keeps showing what it already has. `nav::attempts` bounds itself by the
+  set, so all-broken and set-of-one both end where they began instead of
+  turning round forever — and the 0/1/N tests for that run everywhere.
 
 ---
 
@@ -384,6 +388,31 @@ small pictures come back at the system's minimum window size — 180 px wide
 here, not 5 — so only `panel.png` is checked for an exact rectangle: that is
 the OS enforcing `SM_CXMINTRACK`, not Toss getting a size wrong.
 
+M7's walk is M6's plus the picture M6 stopped at: right from `small.gif`
+lands on the **unicode-named file**, skipping `truncated.png`; the next right
+wraps as before; coming back left skips it again. Sixteen checks, exit 0.
+
+M7 is also where the exit codes became things a pipeline checks rather than
+things a person reads: `tests/image.rs` runs the *real command* against five
+inputs and asserts the number §24 tables for each — missing path **4**,
+`view` on a directory **2**, `view` on a file that is not an image **3**
+(decided from the classifier, §6, so it is never mistaken for a corrupt
+picture), a broken image **6** where a viewer exists and **3** where one does
+not, and — gated off on any platform that *has* a viewer — a good image **3**
+with `not implemented yet: image viewing` on a platform that does not. None
+of them can open a window, which is the property that keeps them in `cargo
+test` instead of in the manual smoke (STATUS.md §3.12).
+
+Measured by running the shipped binary, `--all-features`:
+
+```text
+toss tests/corpus/image/truncated.png   exit 6   input is corrupted or incomplete: ...
+toss tests/corpus/image/nope.png        exit 4   input not found: ...
+toss view tests/corpus/image            exit 2   ... is not an image file
+toss view Cargo.toml                    exit 3   unsupported format: ...
+toss Cargo.toml                         exit 0   (the info fallback, §7)
+```
+
 A real desktop session is still what M8 signs off: it catches what no probe
 does — a window that opens behind others, a cursor that never changes, a
 picture that is present but wrong in a way nobody thought to sample.
@@ -414,6 +443,7 @@ milestone rather than accumulated:
 | M4, zoom | 694,272 | 206,848 | +1,024 / 0 |
 | M5, pan | 695,808 | 206,848 | +1,536 / 0 |
 | M6, previous / next | 698,880 | 206,848 | +3,072 / 0 |
+| M7, error handling | 700,928 | 206,848 | +2,048 / 0 |
 
 Plus, from the §6 spike: `windows-rs` floor **+4,096 B**, transitive crates
 **+15**.

@@ -413,9 +413,44 @@ pub mod nav {
         if index == 0 { count - 1 } else { index - 1 }
     }
 
+    /// Every *other* image in the set, in the order a browsing step tries
+    /// them, wrapping once and stopping before it comes back to `start`.
+    ///
+    /// This is the shape of "step over the picture that will not open":
+    /// [`next`] and [`previous`] only say where a single step lands, but a
+    /// viewer asked to move on has to keep stepping while the picture it
+    /// lands on refuses to decode (`IMAGE_VIEWER.md` §5). The sequence is
+    /// bounded by the set itself, so a directory where every file is broken
+    /// ends where it began instead of turning round forever — and a set of
+    /// one has nothing to offer at all, which is why it comes back empty.
+    ///
+    /// *Which* of these candidates actually decodes is a question about
+    /// files and decoders, not about the rule; what the rule owns is the
+    /// order and the guarantee of at most once each.
+    #[must_use]
+    pub fn attempts(start: usize, count: usize, forward: bool) -> Vec<usize> {
+        let mut order = Vec::new();
+
+        if count == 0 {
+            return order;
+        }
+
+        let mut candidate = start % count;
+        for _ in 1..count {
+            candidate = if forward {
+                next(candidate, count)
+            } else {
+                previous(candidate, count)
+            };
+            order.push(candidate);
+        }
+
+        order
+    }
+
     #[cfg(test)]
     mod tests {
-        use super::{next, previous};
+        use super::{attempts, next, previous};
 
         #[test]
         fn the_set_of_one_stays_on_the_one() {
@@ -496,6 +531,79 @@ pub mod nav {
                 2,
                 "and the one before 0 is the last"
             );
+        }
+
+        #[test]
+        fn a_step_tries_every_other_picture_once_and_stops_before_home() {
+            // The whole point of the sequence: from index 0 of three, both
+            // directions offer 1 and 2, in the order the direction implies,
+            // and neither offers 0 — that is where the step came from, and
+            // offering it would let a viewer that failed everywhere answer
+            // "the next picture" with the picture it was already showing.
+            assert_eq!(attempts(0, 3, true), vec![1, 2]);
+            assert_eq!(attempts(0, 3, false), vec![2, 1]);
+
+            // From the middle: no wrap needed, order preserved.
+            assert_eq!(attempts(1, 3, true), vec![2, 0]);
+            assert_eq!(attempts(1, 3, false), vec![0, 2]);
+
+            // From the end: the wrap is in the sequence, not just in `next`.
+            assert_eq!(attempts(2, 3, true), vec![0, 1]);
+            assert_eq!(attempts(2, 3, false), vec![1, 0]);
+        }
+
+        #[test]
+        fn a_step_offer_scales_with_the_set_and_never_repeats() {
+            // N of them, every index but the start, each exactly once —
+            // the guarantee that keeps "keep stepping while it will not
+            // open" from trying the same broken file twice (or the same
+            // good file twice, which would be worse: it would silently
+            // skip a picture that was fine).
+            let count = 7;
+            for start in 0..count {
+                for forward in [true, false] {
+                    let order = attempts(start, count, forward);
+
+                    assert_eq!(order.len(), count - 1, "start {start}, forward {forward}");
+                    assert!(
+                        order.iter().all(|index| *index != start),
+                        "start {start} came back round: {order:?}"
+                    );
+                    assert!(
+                        order.iter().all(|index| *index < count),
+                        "an index outside the set: {order:?}"
+                    );
+
+                    let mut seen = order.clone();
+                    seen.sort_unstable();
+                    seen.dedup();
+                    assert_eq!(
+                        seen.len(),
+                        count - 1,
+                        "something was offered twice from {start}"
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn a_step_there_is_nothing_to_step_to_offers_nothing() {
+            // The 0 and the 1 of the boundary: an empty set cannot be walked
+            // and a set of one has no other picture, so both answer "nothing
+            // to try" rather than looping or inventing an index (§23).
+            assert!(attempts(0, 0, true).is_empty());
+            assert!(attempts(0, 0, false).is_empty());
+            assert!(attempts(0, 1, true).is_empty());
+            assert!(attempts(0, 1, false).is_empty());
+        }
+
+        #[test]
+        fn a_start_outside_the_set_still_walks_it_from_where_it_lands() {
+            // The index came from a request, not from this function; taking
+            // it modulo the count first is what stops a nonsense start from
+            // producing nonsense candidates (§23).
+            assert_eq!(attempts(4, 3, true), vec![2, 0], "4 lands on 1, then walks");
+            assert_eq!(attempts(usize::MAX, 3, false), vec![2, 1]);
         }
     }
 }

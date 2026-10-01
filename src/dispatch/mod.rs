@@ -81,7 +81,17 @@ fn route(verb: Option<Verb>, input: &Input, kind: Kind) -> Result<(), TossError>
 
         // `toss view photo.jpg` — same again; the handler decides whether the
         // input is something a viewer can open (§4.2).
-        Some(Verb::View) => crate::handlers::image::view(input.path()),
+        //
+        // The classifier has already run (§6), so the *kind* question can be
+        // answered here rather than at the decoder: a file that is neither an
+        // image nor a directory is something a viewer has no action for at
+        // all, which §24 tables as 3. A directory keeps its route to the
+        // handler, where the complaint names what the person typed — "is not
+        // an image file" (2) — instead of the vaguer "unsupported format".
+        Some(Verb::View) => match kind {
+            Kind::Image | Kind::Directory => crate::handlers::image::view(input.path()),
+            _ => Err(TossError::UnsupportedFormat(input.path().to_path_buf())),
+        },
 
         // The remaining verbs have no handler yet, so naming one is still
         // the most useful reply (§4.2).
@@ -327,6 +337,22 @@ mod tests {
             err.to_string().contains("is not an image file"),
             "expected the handler's own complaint, got: {err}"
         );
+    }
+
+    #[test]
+    fn the_view_verb_refuses_a_file_that_is_not_an_image_at_all() {
+        // The classifier has already said what this is (§6), so the viewer
+        // arm can answer the kind question before a decoder ever sees the
+        // file. §24 keeps 3 and 6 apart here: nothing is *wrong* with a
+        // manifest, it simply is not a picture — reporting it as a corrupt
+        // image would send a script looking for damage that is not there.
+        let err = run(Command::Explicit {
+            verb: Verb::View,
+            args: vec![manifest("Cargo.toml")],
+        })
+        .expect_err("a manifest is not something to view");
+
+        assert_eq!(err.exit_code(), ExitCode::UnsupportedFormat);
     }
 
     #[test]

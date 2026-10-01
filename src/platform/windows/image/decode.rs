@@ -8,7 +8,9 @@
 use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 
-use windows::Win32::Foundation::GENERIC_READ;
+use windows::Win32::Foundation::{
+    ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND, GENERIC_READ,
+};
 use windows::Win32::Graphics::Imaging::{
     CLSID_WICImagingFactory, GUID_WICPixelFormat32bppPBGRA, IWICImagingFactory,
     WICBitmapDitherTypeNone, WICBitmapPaletteTypeCustom, WICDecodeMetadataCacheOnDemand,
@@ -48,10 +50,16 @@ pub(super) fn decode(path: &Path) -> Result<Decoded, TossError> {
     //   WIC itself reported, checked for overflow before allocation, and
     //   passed to `CopyPixels` as the buffer it is.
     unsafe {
+        // The two object *factories* are about this machine working, not
+        // about this file: a failure there is a broken Windows, not a broken
+        // picture, so it stays a generic failure (§24's 1) rather than
+        // being reported as a corrupt input the user could fix.
         let factory: IWICImagingFactory =
             CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER)
-                .map_err(platform)?;
+                .map_err(|err| super::failed("decode the image", err))?;
 
+        // Everything from here down is about *this file*, and `refused` is
+        // the one place that decides which number it answers with.
         let decoder = factory
             .CreateDecoderFromFilename(
                 PCWSTR(wide.as_ptr()),
@@ -59,10 +67,12 @@ pub(super) fn decode(path: &Path) -> Result<Decoded, TossError> {
                 GENERIC_READ,
                 WICDecodeMetadataCacheOnDemand,
             )
-            .map_err(platform)?;
-        let frame = decoder.GetFrame(0).map_err(platform)?;
+            .map_err(|err| refused(path, err))?;
+        let frame = decoder.GetFrame(0).map_err(|err| refused(path, err))?;
 
-        let converter = factory.CreateFormatConverter().map_err(platform)?;
+        let converter = factory
+            .CreateFormatConverter()
+            .map_err(|err| super::failed("decode the image", err))?;
         converter
             .Initialize(
                 &frame,
@@ -72,18 +82,18 @@ pub(super) fn decode(path: &Path) -> Result<Decoded, TossError> {
                 0.0,
                 WICBitmapPaletteTypeCustom,
             )
-            .map_err(platform)?;
+            .map_err(|err| refused(path, err))?;
 
         let (mut width, mut height) = (0_u32, 0_u32);
         converter
             .GetSize(&mut width, &mut height)
-            .map_err(platform)?;
+            .map_err(|err| refused(path, err))?;
 
         // A zero-sized image is not an error WIC reports often, but it is
-        // one it is allowed to, and multiplying it through would produce an
-        // empty buffer that `CopyPixels` would then be asked to fill.
+        // one it is allowed to — and it is still a statement about the file
+        // rather than about the system (§24: 6, not 1).
         if width == 0 || height == 0 {
-            return Err(TossError::other("image reports no pixels"));
+            return Err(corrupt(path, "the image reports no pixels"));
         }
 
         // Checked rather than `width * 4`: this is a number a file chose,
@@ -91,15 +101,15 @@ pub(super) fn decode(path: &Path) -> Result<Decoded, TossError> {
         // a release one either).
         let stride = width
             .checked_mul(4)
-            .ok_or_else(|| TossError::other("image is too wide to lay out"))?;
+            .ok_or_else(|| corrupt(path, "the image is too wide to lay out"))?;
         let length = (stride as usize)
             .checked_mul(height as usize)
-            .ok_or_else(|| TossError::other("image is too large to hold in memory"))?;
+            .ok_or_else(|| corrupt(path, "the image is too large to hold in memory"))?;
 
         let mut pixels = vec![0_u8; length];
         converter
             .CopyPixels(std::ptr::null(), stride, &mut pixels)
-            .map_err(platform)?;
+            .map_err(|err| refused(path, err))?;
 
         Ok(Decoded {
             width,
@@ -147,7 +157,10 @@ fn wide_path(path: &Path) -> Result<Vec<u16>, TossError> {
     let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
 
     if wide.contains(&0) {
-        return Err(TossError::other(format!(
+        // The path came from the command line, and one with an interior NUL
+        // is not a path Windows can name at all — so this is the argument's
+        // fault, not the file's (§24: 2 rather than 6).
+        return Err(TossError::invalid_arguments(format!(
             "path cannot be opened: {}",
             path.display()
         )));
@@ -157,9 +170,56 @@ fn wide_path(path: &Path) -> Result<Vec<u16>, TossError> {
     Ok(wide)
 }
 
-/// A `windows-rs` failure, in words a person can act on (§23).
+/// A `windows-rs` failure about *this machine*, in words a person can act
+/// on (§23). Not for failures about the file being decoded — those go
+/// through [`refused`], which knows which of §24's numbers each one earns.
 fn platform(err: Error) -> TossError {
     super::failed("decode the image", err)
+}
+
+/// A decoder said no. This is the one place that decides which of §24's
+/// numbers a failed decode answers with.
+///
+/// Toss only reaches a decoder with a file it has already classified as an
+/// image — by extension or by magic (§6) — so a decoder that refuses it is
+/// reporting on the *contents*. That is §24's "corrupt or incomplete",
+/// **exit 6**, not exit 3: the format was recognised, the bytes were not
+/// usable as that format. WIC's own text (`Unknown image format`) reads
+/// like "unsupported", but it is answering for a file whose extension said
+/// `png`, and the difference between "no decoder for this" and "this is no
+/// longer a png" is exactly what the two codes exist to keep apart.
+///
+/// Two answers are about the file's *availability* rather than its contents
+/// and keep their own numbers: a file that vanished is 4, one that is shut
+/// against us is 5. A script waiting for a lock to clear has no use for
+/// being told the picture is broken.
+fn refused(path: &Path, err: Error) -> TossError {
+    let code = err.code().0;
+
+    if code == from_win32(ERROR_ACCESS_DENIED.0) {
+        return TossError::PermissionDenied(path.to_path_buf());
+    }
+    if code == from_win32(ERROR_FILE_NOT_FOUND.0) || code == from_win32(ERROR_PATH_NOT_FOUND.0) {
+        return TossError::InputNotFound(path.to_path_buf());
+    }
+
+    corrupt(path, &err.to_string())
+}
+
+/// The contents of `path` will not decode (§24: exit 6), in the words the
+/// reason was found in.
+fn corrupt(path: &Path, context: &str) -> TossError {
+    TossError::CorruptInput {
+        path: path.to_path_buf(),
+        context: context.to_owned(),
+    }
+}
+
+/// A Win32 error code in its HRESULT form: `HRESULT_FROM_WIN32(n)` puts the
+/// code in the low word under facility 5. Computed rather than imported
+/// because `windows-rs` 0.62 does not export the conversion helper.
+const fn from_win32(code: u32) -> i32 {
+    (0x8007_0000_u32 | code) as i32
 }
 
 #[cfg(test)]
@@ -240,9 +300,12 @@ mod tests {
     }
 
     #[test]
-    fn a_broken_png_is_reported_rather_than_returning_empty() {
-        // Not "unsupported": the format was recognised and then refused, and
-        // §24 keeps those two apart (exit 6 against exit 3).
+    fn a_broken_png_is_reported_as_a_corrupt_input_not_a_failure() {
+        // §24 keeps exit 6 and exit 1 apart, and this is the case that
+        // earns the 6: the extension said `png`, the format was recognised,
+        // and the bytes inside are not one. Reporting it as a generic
+        // failure would tell a script nothing — a script cannot act on
+        // "something went wrong" the way it can on "this file is broken".
         //
         // The fixture stops inside its header on purpose. A file cut in the
         // middle of its pixel data is a different case — WIC returns the rows
@@ -251,18 +314,31 @@ mod tests {
         let err = decode(&sample("truncated.png")).expect_err("a broken PNG is not an image");
 
         assert!(
-            matches!(err, TossError::Other(_)),
-            "expected a decode failure, got {err:?}"
+            matches!(err, TossError::CorruptInput { .. }),
+            "expected a corrupt input, got {err:?}"
+        );
+        assert_eq!(
+            err.exit_code(),
+            crate::core::exit_code::ExitCode::CorruptInput,
+            "the number §24 tables for this is 6, got {err}"
+        );
+        assert!(
+            err.to_string().contains("truncated.png"),
+            "the error should name the file it is about: {err}"
         );
     }
 
     #[test]
     fn a_file_that_is_not_an_image_at_all_is_refused_without_panic() {
+        // Reached only by calling the decoder directly — `toss view` is
+        // refused by the classifier long before this (§6), so what is
+        // asserted here is that a wrong input never *panics* (§23) and
+        // never masquerades as a system fault.
         let err = decode(&Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"))
             .expect_err("a manifest is not a picture");
 
         assert!(
-            matches!(err, TossError::Other(_)),
+            matches!(err, TossError::CorruptInput { .. }),
             "expected a decode failure, got {err:?}"
         );
     }

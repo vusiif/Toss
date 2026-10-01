@@ -507,35 +507,35 @@ unsafe extern "system" fn window_proc(
 /// showing the previous picture with the current picture's zoom, origin and
 /// title would be showing a mixture of two images.
 ///
-/// Nothing is reported to the caller because there is nowhere to report to:
-/// the window procedure answers a message, and `nav` has already decided
-/// that a set of one image simply stays where it is. A picture that refuses
-/// to decode is left alone rather than replacing what is on screen — the
-/// error channel for a failure *while browsing* belongs to M7, and until it
-/// exists the safe answer is to show nothing new rather than something
-/// wrong.
+/// The direction is [`nav`]'s rule, including what to do while the picture
+/// it points at will not open (§5 of `IMAGE_VIEWER.md`): try the rest of the
+/// set in order and take the first one that decodes. A failure *before any
+/// window exists* is a different matter and is reported as one — that is the
+/// file the person asked for. A failure inside a set they are browsing is a
+/// detour, and the useful answer to "next picture" is the next picture that
+/// can be shown, not an error about one that cannot.
 fn browse(state: &mut ViewerState, window: HWND, forward: bool) {
     let count = state.request.images.len();
-    let index = if forward {
-        nav::next(state.request.index, count)
-    } else {
-        nav::previous(state.request.index, count)
-    };
+    let start = state.request.index;
 
-    // A set of one lands on itself, and so does a set of nothing. In both
-    // cases the window already shows everything there is to show.
-    if index == state.request.index {
-        return;
+    // The sequence is bounded by the set itself (`nav::attempts`), so a
+    // directory where every other file is broken ends where it began instead
+    // of turning round forever — and a set of one has nothing to try, which
+    // is the `n = 1` boundary behaving as §5 says it must.
+    let mut opened = None;
+    for candidate in nav::attempts(start, count, forward) {
+        let Some(path) = state.request.images.get(candidate).cloned() else {
+            break;
+        };
+        if let Ok(image) = super::decode::decode(&path) {
+            opened = Some((candidate, image));
+            break;
+        }
     }
 
-    // The path is taken by value: the decode below runs before anything on
-    // `state` may be written, and holding a borrow across that would be a
-    // borrow of the whole request (§ the window procedure's own rule about
-    // references and what may re-enter).
-    let Some(path) = state.request.images.get(index).cloned() else {
-        return;
-    };
-    let Ok(image) = super::decode::decode(&path) else {
+    // Nothing else in the set will open: keep showing what is already on
+    // screen rather than replacing it with nothing.
+    let Some((index, image)) = opened else {
         return;
     };
 
