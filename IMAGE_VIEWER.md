@@ -229,6 +229,59 @@ each addition is a fresh decision rather than a line edit.
 
 ### Feature-set changes during Phase 6 — each one recorded
 
+**M8 added `Win32_System_Console`, for `GetConsoleProcessList` /
+`GetConsoleWindow`.** Dropping an image on `toss.exe` starts a console
+application, so Windows hands it a console window nobody asked for; the fix
+hides that window **when Toss is the only process attached to the console**
+— and only then, because a console a shell is also attached to is the
+user's terminal, not Toss's to take. Accepted on the evidence measured at
+the time:
+
+```text
+new crates                 0
+Cargo.lock delta           0
+dependency closure         still 15 crates
+binary                     700,928 B, unchanged
+capability bought          no stray console behind the viewer
+```
+
+Three alternatives were measured or argued down, and the record is kept
+because each could plausibly be proposed again:
+
+- **`#![windows_subsystem = "windows"]` was built and rejected.** A GUI
+  subsystem *would* remove the console outright, but it changes what shells
+  do with Toss: measured, PowerShell returned in **12 ms** with
+  **`$LASTEXITCODE` never set**, where the CUI build waits and reports.
+  `cmd` behaves the same way. §24 exists so scripts can rely on Toss's exit
+  code, and that contract is worth more than a window that never appears.
+  **Toss is a console application that enters a GUI on demand**, not a GUI
+  application that happens to print.
+- **Hand-writing `extern "system"` for the two calls was rejected.** The ABI
+  risk is near zero — no vtable slots, two plain functions — but the
+  precedent is not: *"windows-rs is the raw declaration layer"* (§7) stops
+  being a rule the moment *"except when the function is simple enough"* is
+  allowed to carve out from it. Feature count is not a product metric;
+  dependency closure, binary cost and one consistent rule are.
+- **Hiding at start-up was rejected.** The check lives on the viewer path,
+  after the decode succeeds and before the window is created — so a bad
+  command line, a corrupt image, or any CLI verb still has the console the
+  user was given to print its error on. "Whether to hide the console" is
+  image-viewer presentation policy, not process start-up policy; a Phase 7
+  player that wants the same treatment should be what prompts any
+  generalisation, not this.
+
+The condition is stated as a fact about the console — *Toss is the only
+process attached to it* — and not as a detector for how Toss was started.
+The second is an inference the API does not provide, and the contract is
+kept to what the API actually says.
+
+What this does **not** promise: the console window is created before Rust's
+`main()` runs, so a brief flash on launch is possible and is not treated as
+a defect to eliminate — only a persistent console behind the viewer is. The
+real-machine observation belongs to M8 and is recorded in §8.
+
+### Feature-set changes during Phase 6 — each one recorded
+
 **M5 added `Win32_UI_Input_KeyboardAndMouse`, for `SetCapture` /
 `ReleaseCapture`.** A drag must keep following the pointer once it leaves the
 client area, and the button-up must arrive wherever it happens; polling
@@ -426,6 +479,27 @@ larger than the window, covers everything the old frame showed anyway. The
 zoom path keeps its erase for a real reason (shrinking leaves pixels nobody
 covers), so the fix is per-path, not global. A `GetPixel` probe cannot see
 this: it reads the *result*, and the result was always correct.
+
+**The console contract, checked with numbers** (the console fix in §6 — three
+of the four checks run on their own, the fourth is a person):
+
+```text
+PowerShell   & toss panel.png     waited 1,689 ms for the viewer to close,
+                                  $LASTEXITCODE = 0
+cmd          toss panel.png       waited 1,651 ms,
+                                  %ERRORLEVEL% = 0 (AFTER=0)
+CI replay    2>&1 >/dev/null      exit=2, stderr='Error: invalid arguments: ...'
+Explorer     drag an image in     ← the one only a person can answer:
+                                  no persistent console, and whether the
+                                  launch flashes briefly (§6 says flash is
+                                  possible and is not a defect to remove)
+```
+
+The first two are the point of keeping the CUI subsystem: a shell waits for
+Toss and reads its exit code. They are also the two a `windows` subsystem
+build fails (§6), so if either number ever comes back as "returned
+immediately" or an empty exit code, the subsystem is no longer CUI and §24
+has been broken.
 
 **Linux CI** is the portability guard. It must stay green, and
 `toss <image>` there must be *defined* behaviour — exit 3,
