@@ -174,10 +174,22 @@ future Linux or macOS backend inherits the same behaviour for free.
 
 Boundary cases **0 / 1 / N must have tests.**
 
-Rendering `i + n - 1` before the modulo is what makes `n = 1` and `n = 0`
-distinguishable without a branch; `n = 0` is guarded at the call site because
-a modulo by zero is a panic and `Toss_AGENTS.md` §23 forbids panics on
-anything the user can influence.
+Two implementation facts, both landed in M6 and both worth knowing before
+touching this code:
+
+- **The guard for `n = 0` is inside the rule, not at the call site.** The
+  formula still reads `(i + n - 1) % n`, but the implementation steps an
+  index that is first taken modulo `n`, which removes both the modulo-by-zero
+  panic and any overflow in `i + n` without a branch at every caller — one
+  forgotten `if` is all "guarded at the call site" needs to become a panic on
+  something the user can influence (`Toss_AGENTS.md` §23).
+- **A picture that will not decode blocks the direction it sits in.** `next`
+  and `previous` are pure; *stepping onto* a picture means decoding it, and
+  until M7 exists a failure leaves the viewer where it is. Walking right into
+  `truncated.png` therefore stays put on every press — correct for now (no
+  panic, no closed window, no good picture replaced by a broken one) and
+  explicitly **not** the finished behaviour: skipping it or reporting it is
+  part of M7's error handling, which is where the decision belongs.
 
 ---
 
@@ -361,6 +373,17 @@ origin lands on; a drag far past the edge and a second one past it land in
 the **same** place, which is the clamp; zooming out brings the picture home;
 exit 0.
 
+M6's walk, printed before *and* after each key so a divergence shows where it
+happened rather than only at the end: open on `panel.png` (320x200), walk
+backwards through `odd.png`, `odd.bmp`, `block.jpg`, **wrap off the front to
+the last image**, wrap forward off the back to `block.jpg`, and forward all
+the way home to an exact 320x200 again; then into `small.gif` and twice into
+`truncated.png`, where the viewer holds still (§5 records why, and what M7
+changes); then a key Toss does not own, which changes nothing; exit 0. The
+small pictures come back at the system's minimum window size — 180 px wide
+here, not 5 — so only `panel.png` is checked for an exact rectangle: that is
+the OS enforcing `SM_CXMINTRACK`, not Toss getting a size wrong.
+
 A real desktop session is still what M8 signs off: it catches what no probe
 does — a window that opens behind others, a cursor that never changes, a
 picture that is present but wrong in a way nobody thought to sample.
@@ -390,6 +413,7 @@ milestone rather than accumulated:
 | M3, first render | 693,248 | 206,848 | +1,536 / 0 |
 | M4, zoom | 694,272 | 206,848 | +1,024 / 0 |
 | M5, pan | 695,808 | 206,848 | +1,536 / 0 |
+| M6, previous / next | 698,880 | 206,848 | +3,072 / 0 |
 
 Plus, from the §6 spike: `windows-rs` floor **+4,096 B**, transitive crates
 **+15**.

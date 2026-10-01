@@ -17,19 +17,20 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
 };
-use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
+use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture, VK_LEFT, VK_RIGHT};
 use windows::Win32::UI::WindowsAndMessaging::{
     AdjustWindowRectEx, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW,
     DispatchMessageW, GWLP_USERDATA, GetClientRect, GetMessageW, GetWindowLongPtrW, IDC_ARROW,
-    LoadCursorW, MSG, PostQuitMessage, RegisterClassExW, SW_SHOW, SetWindowLongPtrW, ShowWindow,
-    TranslateMessage, WM_CAPTURECHANGED, WM_DESTROY, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+    LoadCursorW, MSG, PostQuitMessage, RegisterClassExW, SW_SHOW, SWP_NOMOVE, SWP_NOZORDER,
+    SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow, TranslateMessage,
+    WM_CAPTURECHANGED, WM_DESTROY, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
     WM_MOUSEWHEEL, WM_NCDESTROY, WM_PAINT, WNDCLASS_STYLES, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
 };
 use windows::core::{HSTRING, PCWSTR, w};
 
 use super::decode::Decoded;
 use crate::core::error::TossError;
-use crate::platform::image::{ViewRequest, pan, zoom};
+use crate::platform::image::{ViewRequest, nav, pan, zoom};
 
 /// Class name for every window this process creates.
 const CLASS_NAME: PCWSTR = w!("TossImageViewer");
@@ -49,6 +50,11 @@ const CLASS_NAME: PCWSTR = w!("TossImageViewer");
 /// edges they move between do not.
 struct ViewerState {
     image: Decoded,
+    /// The whole browsing session, and where in it the window is. The set
+    /// and its order were decided before any window existed
+    /// (`handlers::image`); what lives here is only the cursor into them,
+    /// moved by the arrow keys through `nav`'s rule.
+    request: ViewRequest,
     zoom: usize,
     /// Where the picture's top-left corner sits in client coordinates.
     /// Zero at start and whenever the picture fits; the range it is allowed
@@ -98,6 +104,7 @@ pub fn run(request: &ViewRequest, image: Decoded) -> Result<(), TossError> {
     // the window is later handed stays valid until nothing can read it.
     let state = Box::new(ViewerState {
         image,
+        request: request.clone(),
         zoom: zoom::START,
         origin: (0, 0),
         drag: None,
@@ -199,7 +206,12 @@ fn title_of(request: &ViewRequest) -> HSTRING {
 /// through as they stand. This asks the system for the outer size that yields
 /// the client size wanted — arithmetic about the frame, not fit logic: the
 /// image is still drawn one to one and nothing is scaled (IMAGE_VIEWER.md
-/// §11). Growing the window around a very large image is M4's question.
+/// §11).
+///
+/// Asked once more whenever browsing lands on a picture of a different size
+/// (`browse`), so the client rectangle keeps matching the picture it shows.
+/// Fit-*to*-window — shrinking the frame around a picture larger than the
+/// screen — remains §11's "not yet".
 fn outer_size(image: &Decoded) -> Result<(i32, i32), TossError> {
     let mut frame = RECT {
         left: 0,
@@ -454,6 +466,25 @@ unsafe extern "system" fn window_proc(
                 LRESULT(0)
             }
 
+            WM_KEYDOWN if slot != 0 => {
+                let state = &mut *(slot as *mut ViewerState);
+
+                // Only the two arrows are Toss's — §18.3 asks for
+                // previous/next and nothing more — and every other key keeps
+                // the system's handling, because a viewer that swallows the
+                // keys it does not understand breaks whatever feature needs
+                // them next.
+                let forward = match u16::try_from(wparam.0) {
+                    Ok(key) if key == VK_RIGHT.0 => true,
+                    Ok(key) if key == VK_LEFT.0 => false,
+                    _ => return DefWindowProcW(window, message, wparam, lparam),
+                };
+
+                browse(state, window, forward);
+
+                LRESULT(0)
+            }
+
             WM_DESTROY => {
                 PostQuitMessage(0);
                 LRESULT(0)
@@ -465,6 +496,85 @@ unsafe extern "system" fn window_proc(
             // would be the same rule written twice.
             _ => DefWindowProcW(window, message, wparam, lparam),
         }
+    }
+}
+
+/// Move the viewer to the image beside this one, in `forward`'s direction.
+///
+/// Everything that changes together changes here: the index, the pixels, the
+/// zoom level, the pan origin, the window's size and the title. They are one
+/// step rather than six because they are one *change of subject* — a viewer
+/// showing the previous picture with the current picture's zoom, origin and
+/// title would be showing a mixture of two images.
+///
+/// Nothing is reported to the caller because there is nowhere to report to:
+/// the window procedure answers a message, and `nav` has already decided
+/// that a set of one image simply stays where it is. A picture that refuses
+/// to decode is left alone rather than replacing what is on screen — the
+/// error channel for a failure *while browsing* belongs to M7, and until it
+/// exists the safe answer is to show nothing new rather than something
+/// wrong.
+fn browse(state: &mut ViewerState, window: HWND, forward: bool) {
+    let count = state.request.images.len();
+    let index = if forward {
+        nav::next(state.request.index, count)
+    } else {
+        nav::previous(state.request.index, count)
+    };
+
+    // A set of one lands on itself, and so does a set of nothing. In both
+    // cases the window already shows everything there is to show.
+    if index == state.request.index {
+        return;
+    }
+
+    // The path is taken by value: the decode below runs before anything on
+    // `state` may be written, and holding a borrow across that would be a
+    // borrow of the whole request (§ the window procedure's own rule about
+    // references and what may re-enter).
+    let Some(path) = state.request.images.get(index).cloned() else {
+        return;
+    };
+    let Ok(image) = super::decode::decode(&path) else {
+        return;
+    };
+
+    state.request.index = index;
+    state.image = image;
+    state.zoom = zoom::START;
+    state.origin = (0, 0);
+    state.drag = None;
+
+    // The window was sized around the picture it opened on, and the next
+    // picture is under no obligation to be that size: without this, a small
+    // image sits in the corner of a large one's window and a large one is
+    // cropped by a frame sized for something else. Keeping the position
+    // (`SWP_NOMOVE`) and the stacking order (`SWP_NOZORDER`) means only the
+    // client rectangle follows the picture — which is the M3 invariant every
+    // calculation in this file still assumes.
+    if let Ok((width, height)) = outer_size(&state.image) {
+        // SAFETY: `window` is live for the whole message loop, and the
+        // flags say the position and z-order arguments are ignored, so the
+        // size is the only thing being asked for.
+        unsafe {
+            let _ = SetWindowPos(window, None, 0, 0, width, height, SWP_NOMOVE | SWP_NOZORDER);
+        }
+    }
+
+    // The title names what the window is showing, so it has to follow the
+    // picture instead of the one it opened on.
+    let title = title_of(&state.request);
+
+    // SAFETY: `window` is live and `title` outlives the call — it is built
+    // from a path the state owns.
+    unsafe {
+        let _ = SetWindowTextW(window, &title);
+    }
+
+    // SAFETY: `window` is live; a null rectangle means the whole client
+    // area, which is what a new picture replaces everywhere at once.
+    unsafe {
+        let _ = InvalidateRect(Some(window), None, true);
     }
 }
 

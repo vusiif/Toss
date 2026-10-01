@@ -265,7 +265,6 @@ pub mod pan {
     #[cfg(test)]
     mod tests {
         use super::{clamp, dragged};
-
         /// Enough travel to reach both ends and overshoot both of them.
         const CONTENT: (i32, i32) = (100, 80);
         const VIEWPORT: (i32, i32) = (40, 30);
@@ -363,6 +362,139 @@ pub mod pan {
                 dragged((-i32::MAX, 0), (i32::MAX, 0), CONTENT, VIEWPORT),
                 (0, 0),
                 "a saturated sum must still be a position, not a wrap"
+            );
+        }
+    }
+}
+
+/// The browsing rule: which image comes after this one, and which before.
+///
+/// **Toss-owned** (`IMAGE_VIEWER.md` §5): previous and next wrap, so browsing
+/// past the last image continues at the first and backwards past the first
+/// continues at the last. Stated as a pure function here rather than left to
+/// the message handler, so a backend on another platform walks the same set
+/// in the same order without being told the rule — and so the 0/1/N boundary
+/// has tests that run everywhere instead of only where a window can open.
+///
+/// Which image is *current* is interaction state and belongs to the platform
+/// half; this answers only where a step from a given index lands.
+///
+/// The same `cfg_attr` as [`zoom`] and [`pan`]: consumed only by the Windows
+/// viewer, tested everywhere (STATUS.md §3.14).
+#[cfg_attr(not(all(windows, feature = "image")), allow(dead_code))]
+pub mod nav {
+    /// The image after this one, wrapping past the end of the set.
+    #[must_use]
+    pub fn next(index: usize, count: usize) -> usize {
+        if count == 0 {
+            return index;
+        }
+
+        // The index is taken modulo the count first: `index + 1` is a plain
+        // addition on a number nothing here chose, and §23 does not allow an
+        // index — or an index bug — to panic on overflow. It also means an
+        // index that is already out of range steps to a legal one rather
+        // than walking further out of range.
+        (index % count + 1) % count
+    }
+
+    /// The image before this one, wrapping past the front of the set.
+    #[must_use]
+    pub fn previous(index: usize, count: usize) -> usize {
+        if count == 0 {
+            return index;
+        }
+
+        // The same modulo-first shape as `next`, written as a step back
+        // rather than as `(index + count - 1) % count`: the two are the same
+        // rule, but this form has no addition that can overflow and no
+        // subtraction that can underflow (§23).
+        let index = index % count;
+        if index == 0 { count - 1 } else { index - 1 }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{next, previous};
+
+        #[test]
+        fn the_set_of_one_stays_on_the_one() {
+            // The 1 of the 0/1/N boundary: both directions have somewhere to
+            // go in principle and nowhere to go in fact, so the open image
+            // is where a press lands. A rule that wrapped here would send a
+            // viewer of a single picture spinning through a set of one.
+            assert_eq!(next(0, 1), 0);
+            assert_eq!(previous(0, 1), 0);
+        }
+
+        #[test]
+        fn the_set_of_two_always_lands_on_the_other_one() {
+            // The N boundary at its smallest: the only pair of distinct
+            // images, where "wrap" and "stop at the end" are easiest to
+            // confuse and most worth pinning down.
+            assert_eq!(next(0, 2), 1);
+            assert_eq!(next(1, 2), 0, "past the last has to continue at the first");
+            assert_eq!(
+                previous(0, 2),
+                1,
+                "past the first has to continue at the last"
+            );
+            assert_eq!(previous(1, 2), 0);
+        }
+
+        #[test]
+        fn walking_the_whole_set_returns_to_where_it_started() {
+            // A loop rather than a list: `count` steps in either direction
+            // bring the index back, which is what "wraps" means and what a
+            // viewer's left and right arrows have to feel like.
+            let count = 3;
+
+            for start in 0..count {
+                let mut index = start;
+                for _ in 0..count {
+                    index = next(index, count);
+                }
+                assert_eq!(index, start, "next walked off the end of the loop");
+
+                let mut index = start;
+                for _ in 0..count {
+                    index = previous(index, count);
+                }
+                assert_eq!(index, start, "previous walked off the front of the loop");
+            }
+        }
+
+        #[test]
+        fn the_empty_set_has_nowhere_to_go_and_says_so_quietly() {
+            // The 0 of the boundary, and the reason the rule guards it
+            // itself: a modulo by zero panics, §23 forbids a panic on
+            // anything the user can influence, and guarding at *every* call
+            // site is one forgotten `if` away from doing exactly that. The
+            // empty set is refused before a window exists
+            // (`IMAGE_VIEWER.md` §5) — this is the second line of defence,
+            // not the first.
+            assert_eq!(next(0, 0), 0);
+            assert_eq!(previous(0, 0), 0);
+            assert_eq!(next(7, 0), 7, "with nothing to step to, nothing moves");
+        }
+
+        #[test]
+        fn an_index_outside_the_set_still_lands_inside_it() {
+            // Nothing here chose the index — it came from a request and a
+            // set of files — so an index that is somehow past the count has
+            // to produce an image that exists rather than an out-of-range
+            // one for the caller to trip over later (§23).
+            assert_eq!(next(5, 3), 0, "5 -> 0 is the wrap the count implies");
+            assert_eq!(previous(5, 3), 1);
+            assert_eq!(
+                next(usize::MAX, 3),
+                1,
+                "usize::MAX % 3 is 0, so one step on"
+            );
+            assert_eq!(
+                previous(usize::MAX, 3),
+                2,
+                "and the one before 0 is the last"
             );
         }
     }
