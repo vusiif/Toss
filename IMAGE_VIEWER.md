@@ -612,6 +612,36 @@ Two things this table is honest about:
 Milestones M2 onward append rows here as they land, and the Phase 6 completion
 report closes the table.
 
+### Phase 6, closed out — M10
+
+The whole milestone, measured at the end rather than argued from the rows:
+
+| | before Phase 6 (`973b910`) | after M8 | change |
+|---|---|---|---|
+| `--all-features` | 664,064 | **709,120** | **+45,056 (+6.8%)** |
+| without features | 189,952 | **206,848** | **+16,896 (+8.9%)** |
+
+Two figures that make the second row worth its own line: every one of those
++16,896 bytes arrived in **M0** (the boundary, the dispatch arm, the refusal
+that answers a platform with no viewer) and **no later milestone moved it
+again** — the viewer, its window, its rules, its console and its fixes all
+cost exactly nothing in a build that never asked for them. That is what the
+target-gated optional dependency in §3 was for.
+
+Dependency closure, counted at the end: **15 external crates**, every one of
+them pulled by `windows` 0.62.2 — the crate itself, ten `windows-*` support
+crates it splits its surface across, and the four (`syn`, `quote`,
+`proc-macro2`, `unicode-ident`) that generate their bindings. `Cargo.lock`
+was written once, in M0 (`471cab1`), and **no milestone since has touched
+it**: every feature decision recorded in §6 — the two accepted and the two
+refused — cost zero crates, which is exactly what those records claim and
+now what the file proves.
+
+CI, measured rather than predicted: the five pushes closing out M8 each ran
+all three jobs (windows / ubuntu / MSRV) **green**, in **1m0s–1m17s** wall
+time each — runs `36846171137` through `36854155085`, latest `success` on
+`1a7e433`.
+
 ---
 
 ## 10. Non-goals
