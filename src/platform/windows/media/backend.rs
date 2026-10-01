@@ -15,15 +15,18 @@ use std::ptr;
 
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Media::MediaFoundation::{
-    IMFMediaSession, IMFMediaSource, IMFPresentationDescriptor, IMFStreamDescriptor, IMFTopology,
-    MEDIA_EVENT_GENERATOR_GET_EVENT_FLAGS, MEEndOfPresentation, MESessionClosed, MF_OBJECT_TYPE,
-    MF_RESOLUTION_MEDIASOURCE, MF_TOPOLOGY_OUTPUT_NODE, MF_TOPOLOGY_SOURCESTREAM_NODE,
-    MF_TOPONODE_NOSHUTDOWN_ON_REMOVE, MF_TOPONODE_PRESENTATION_DESCRIPTOR, MF_TOPONODE_SOURCE,
-    MF_TOPONODE_STREAM_DESCRIPTOR, MF_VERSION, MFCreateAudioRendererActivate, MFCreateMediaSession,
-    MFCreateSourceResolver, MFCreateTopology, MFCreateTopologyNode, MFCreateVideoRendererActivate,
+    IMFMediaSession, IMFMediaSource, IMFPresentationDescriptor, IMFSimpleAudioVolume,
+    IMFStreamDescriptor, IMFTopology, MEDIA_EVENT_GENERATOR_GET_EVENT_FLAGS, MEEndOfPresentation,
+    MESessionClosed, MF_OBJECT_TYPE, MF_PD_DURATION, MF_RESOLUTION_MEDIASOURCE,
+    MF_TOPOLOGY_OUTPUT_NODE, MF_TOPOLOGY_SOURCESTREAM_NODE, MF_TOPONODE_NOSHUTDOWN_ON_REMOVE,
+    MF_TOPONODE_PRESENTATION_DESCRIPTOR, MF_TOPONODE_SOURCE, MF_TOPONODE_STREAM_DESCRIPTOR,
+    MF_VERSION, MFCreateAudioRendererActivate, MFCreateMediaSession, MFCreateSourceResolver,
+    MFCreateTopology, MFCreateTopologyNode, MFCreateVideoRendererActivate, MFGetService,
     MFMediaType_Audio, MFMediaType_Video, MFSTARTUP_FULL, MFShutdown, MFStartup,
+    MR_POLICY_VOLUME_SERVICE,
 };
 use windows::Win32::System::Com::StructuredStorage::PROPVARIANT;
+use windows::Win32::System::Variant::VT_I8;
 use windows::core::{IUnknown, Interface, PCWSTR};
 
 use crate::core::error::TossError;
@@ -42,7 +45,8 @@ pub(super) fn play(path: &Path) -> Result<(), TossError> {
     // failures too — spend the least, report the most).
     let source = open_source(path)?;
 
-    let (descriptor, planned) = probe(path, &source)?;
+    let (descriptor, planned, duration) = probe(path, &source)?;
+    let duration = duration.min(i64::MAX as u64) as i64;
     let has_video = planned.iter().any(|stream| stream.video);
 
     let session = Session::new(path)?;
@@ -61,7 +65,7 @@ pub(super) fn play(path: &Path) -> Result<(), TossError> {
         // Blocks until the window is gone — the presentation's end destroys
         // it, and so does the cross — and surfaces any failure the event
         // pump recorded on its way.
-        super::player::run(window, session.inner.clone(), path)?;
+        super::player::run(window, session.inner.clone(), path, duration)?;
 
         session.close(path)?;
     } else {
@@ -71,7 +75,7 @@ pub(super) fn play(path: &Path) -> Result<(), TossError> {
         let topology = topology(path, &source, &descriptor, &planned, None)?;
         start(&session, path, &topology)?;
 
-        session.wait_for(path, MEEndOfPresentation.0 as u32)?;
+        session.wait_for(path, MEEndOfPresentation.0 as u32, false)?;
         session.close(path)?;
     }
 
@@ -169,7 +173,7 @@ impl Session {
     /// that waits forever would need MF to break its own guarantee. The
     /// failure mode it *can* have is returning an error the caller maps
     /// through `from_hresult`, which is where §24's number comes from.
-    fn wait_for(&self, path: &Path, kind: u32) -> Result<(), TossError> {
+    fn wait_for(&self, path: &Path, kind: u32, closing: bool) -> Result<(), TossError> {
         loop {
             // SAFETY: the session is alive for the whole of `play`, and the
             // three calls only read its state and the event it hands back —
@@ -196,7 +200,7 @@ impl Session {
                 (arrived, status)
             };
 
-            if status.is_err() {
+            if status.is_err() && !closing {
                 return Err(super::from_hresult(path, "play the file", status));
             }
 
@@ -216,10 +220,62 @@ impl Session {
                 .map_err(|err| super::failed(path, "close the playback session", err))?;
         }
 
-        self.wait_for(path, MESessionClosed.0 as u32)
+        self.wait_for(path, MESessionClosed.0 as u32, true)
     }
 }
 
+/// The audio renderer's master-volume interface, through MF's service
+/// lookup.
+///
+/// `MR_POLICY_VOLUME_SERVICE` is the master-volume service an audio
+/// renderer exposes (Microsoft Learn, "Service Interfaces"), and
+/// `IMFSimpleAudioVolume` rather than the per-channel
+/// `IMFAudioStreamVolume` because D2's volume keys are one up/down control,
+/// not a mixer.
+fn simple_audio_volume(
+    path: &Path,
+    session: &IMFMediaSession,
+) -> Result<IMFSimpleAudioVolume, TossError> {
+    let mut raw = std::ptr::null_mut();
+
+    // SAFETY: `raw` is local out-storage; the IID is the interface being
+    // asked for, so the pointer that comes back *is* that interface, and
+    // `from_raw` takes over the single reference MF handed us — dropped,
+    // and released, when the returned value goes out of scope.
+    unsafe {
+        MFGetService(
+            session,
+            &MR_POLICY_VOLUME_SERVICE,
+            &IMFSimpleAudioVolume::IID,
+            &mut raw,
+        )
+        .map_err(|err| super::failed(path, "reach the volume control", err))?;
+
+        Ok(IMFSimpleAudioVolume::from_raw(raw))
+    }
+}
+
+/// A `PROPVARIANT` carrying one absolute position (VT_I8, 100-ns units).
+///
+/// Built field by field because windows-rs exposes the C layout directly:
+/// the variant type in the header, the value in the union behind it. The
+/// zeroed default is VT_EMPTY — "no position", which is what `resume`
+/// uses; this is the same structure with a position written into it.
+fn position_at(target: i64) -> PROPVARIANT {
+    let mut position = PROPVARIANT::default();
+
+    // SAFETY: reading a union field is the unsafe step — the field behind
+    // `Anonymous` is a `ManuallyDrop` wrapper, so reading it runs no
+    // destructor and hands out a plain `&mut` the header can be filled
+    // through. What is written afterwards (the variant type, then the value
+    // union) needs no further ceremony: the reference above already made the
+    // access exclusive.
+    let header = unsafe { &mut *position.Anonymous.Anonymous };
+    header.vt = VT_I8;
+    header.Anonymous.hVal = target;
+
+    position
+}
 impl Drop for Session {
     fn drop(&mut self) {
         // The safety net: an error path skips `close`, and MF requires a
@@ -303,7 +359,7 @@ pub(super) struct PlannedStream {
 pub(super) fn probe(
     path: &Path,
     source: &IMFMediaSource,
-) -> Result<(IMFPresentationDescriptor, Vec<PlannedStream>), TossError> {
+) -> Result<(IMFPresentationDescriptor, Vec<PlannedStream>, u64), TossError> {
     // SAFETY: `source` is a live object borrowed from the caller; every call
     // returns a `Result`; the descriptor handed back is a referenced
     // interface MF gives us ownership of.
@@ -311,6 +367,12 @@ pub(super) fn probe(
         let descriptor = source
             .CreatePresentationDescriptor()
             .map_err(|err| super::failed(path, "read the presentation descriptor", err))?;
+
+        // How long this presentation is, for clamping a seek into it. A
+        // source that does not answer gets u64::MAX, which is the same
+        // as no clamp at all — the honest default when the length is
+        // genuinely unknown, and every format in the corpus answers.
+        let duration = descriptor.GetUINT64(&MF_PD_DURATION).unwrap_or(u64::MAX);
 
         let count = descriptor
             .GetStreamDescriptorCount()
@@ -352,7 +414,7 @@ pub(super) fn probe(
             return Err(TossError::UnsupportedFormat(path.to_path_buf()));
         }
 
-        Ok((descriptor, planned))
+        Ok((descriptor, planned, duration))
     }
 }
 
@@ -503,6 +565,96 @@ pub(super) fn topology(
 
         Ok(topology)
     }
+}
+
+/// Begin or resume playing from wherever the clock is.
+///
+/// An empty `PROPVARIANT` means "the current position" — for a paused
+/// session that is the pause point, which is what makes this the other
+/// half of D2's play/pause (§18.4).
+pub(super) fn resume(session: &IMFMediaSession, path: &Path) -> Result<(), TossError> {
+    // SAFETY: a null time format is GUID_NULL (presentation time, which
+    // every source supports) and the position is an owned local.
+    unsafe {
+        let position = PROPVARIANT::default();
+        session
+            .Start(ptr::null(), &position)
+            .map_err(|err| super::failed(path, "resume playback", err))
+    }
+}
+
+/// Stop handing out samples until the next `resume`.
+pub(super) fn pause(session: &IMFMediaSession, path: &Path) -> Result<(), TossError> {
+    // SAFETY: the session is alive and owned by this wrapper.
+    unsafe { session.Pause() }.map_err(|err| super::failed(path, "pause playback", err))
+}
+
+/// Where the media clock is right now, in 100-nanosecond units.
+///
+/// `GetCorrelatedTime` rather than a wall clock: seeking speaks the same
+/// units, so a step is arithmetic on this number.
+pub(super) fn current_time(session: &IMFMediaSession, path: &Path) -> Result<i64, TossError> {
+    let mut now = 0_i64;
+    let mut system = 0_i64;
+
+    // SAFETY: the session is alive and owned by this wrapper; both
+    // out-parameters point at local storage; the reserved flag is zero
+    // as the contract requires.
+    unsafe {
+        let clock = session
+            .GetClock()
+            .map_err(|err| super::failed(path, "read the media clock", err))?;
+        clock
+            .GetCorrelatedTime(0, &mut now, &mut system)
+            .map_err(|err| super::failed(path, "read the media clock", err))?;
+    }
+
+    Ok(now)
+}
+
+/// Jump to an absolute position in the presentation (100-ns units).
+///
+/// Negative targets are clamped to zero here: an arrow key held at the
+/// start of a file must not ask for a position before it exists.
+/// Running past the end is left to MF — its answer (stop there, or
+/// refuse) is something to measure on a real machine, not to guess.
+pub(super) fn seek_to(
+    session: &IMFMediaSession,
+    path: &Path,
+    target: i64,
+) -> Result<(), TossError> {
+    // SAFETY: a null time format is GUID_NULL, and the position is an
+    // owned local this call reads.
+    unsafe {
+        let position = position_at(target.max(0));
+        session
+            .Start(ptr::null(), &position)
+            .map_err(|err| super::failed(path, "seek", err))
+    }
+}
+
+/// The renderer's master volume, 0.0..=1.0.
+pub(super) fn volume(session: &IMFMediaSession, path: &Path) -> Result<f32, TossError> {
+    let volume = simple_audio_volume(path, session)?;
+
+    // SAFETY: the interface was just created for this call and drops
+    // after it.
+    unsafe { volume.GetMasterVolume() }.map_err(|err| super::failed(path, "read the volume", err))
+}
+
+/// Set the renderer's master volume, clamped into 0.0..=1.0 — a held
+/// arrow key must not be able to ask for a level the system rejects.
+pub(super) fn set_volume(
+    session: &IMFMediaSession,
+    path: &Path,
+    level: f32,
+) -> Result<(), TossError> {
+    let volume = simple_audio_volume(path, session)?;
+
+    // SAFETY: as `volume` above; the level is clamped to the documented
+    // range before it crosses the FFI boundary.
+    unsafe { volume.SetMasterVolume(level.clamp(0.0, 1.0)) }
+        .map_err(|err| super::failed(path, "set the volume", err))
 }
 
 /// The path as MF wants it: a NUL-terminated UTF-16 buffer.

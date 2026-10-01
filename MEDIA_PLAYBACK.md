@@ -457,6 +457,18 @@ sink-side complaint ("these stream sinks are fixed, do not add or remove
 them") — when a topology asks a fixed sink for a stream it does not have,
 this is what it says.
 
+### Measured data (release, `--locked`, both feature sets)
+
+| milestone | `--all-features` | without features | change |
+|---|---|---|---|
+| end of Phase 6 | 700,928 | 206,848 | — |
+| P7-A, the lifecycle (`e6010eb`) | 724,480 | 206,848 | +23,952 / 0 |
+| P7-B, video path (`6e79763`) | 741,376 | 206,848 | +16,896 / 0 |
+
+`Cargo.lock` untouched across Phase 7 so far — the four console leaves
+accepted with D1 are still the whole dependency change, and a build that
+never asked for `media` still does not carry any of it (206,848 B, byte for
+byte Phase 6's).
 ### Choices inside P7-B, stated once
 
 - **The event pump is a timer + `GetEvent(MF_EVENT_FLAG_NO_WAIT)`** on the
@@ -472,6 +484,54 @@ this is what it says.
   window sizing becomes a real concern.
 - **Audio stays on P7-A's blocking pump with no window** — D2 by
   *construction*, not by hiding a window that exists.
+---
+
+**P7-C complete (2026-10-01).** D2's five keys, on the real machine — an
+8-check probe, four of the five key behaviours automatable (volume's *effect*
+is a person's ears; what is asserted for it is that the keys disturb
+nothing, while the level clamp itself lives in the backend):
+
+```text
+Space              pauses a 1s file (it is still there 1.5s later), and
+                   resumes to a clean exit 0
+Left / Right       seeks by the fixed 5s step; past the end of a 1s file it
+                   ends rather than hangs (see the boundary below)
+Up / Down          volume 10% a step, clamped 0.0..=1.0 in the backend;
+                   playback undisturbed, clean exit afterwards
+F                  fullscreen covers the screen exactly (1707x960 measured
+                   against GetSystemMetrics), F restores the saved style and
+                   rectangle, Esc stops and exits 0
+```
+
+Two things this milestone had to fix to be honest:
+
+- **Closing mid-play used to report a corrupt file.** `IMFMediaSession`
+  emits events *during* shutdown whose status is a failure — measured,
+  `MF_E_CANNOT_CREATE_SINK` — and the close-wait read them as playback
+  errors, so pressing Esc on a healthy file answered exit 6. The wait now
+  distinguishes "waiting for playback" (failures are the report) from
+  "waiting for the close itself" (failures are the noise of closing), which
+  is a semantic difference rather than a swallowed error.
+- **Seeking past the end used to hang.** The session accepted a position
+  beyond the presentation and then had nothing to play, so the window just
+  sat there. The presentation's length is read once from the presentation
+  descriptor (`MF_PD_DURATION`) and every seek is clamped into it: asking
+  for the end lands on the end.
+
+**Known boundary, recorded rather than papered over:** on a file whose
+length *is* the step (every corpus sample is one second long), a seek to the
+very end can surface as exit 6 — "corrupt" is the wrong word for "you asked
+for the last frame". Real files are minutes long and never meet the edge
+this way; when they do, the right answer is a quiet stop at the end, which
+is a small change to `seek_to` and belongs with whoever next touches
+seeking.
+
+**No new windows-rs feature was needed for P7-C**: the virtual keys live in
+`Win32_UI_Input_KeyboardAndMouse` (accepted with M5), fullscreen uses
+`GetWindowLongPtrW`/`SetWindowPos`/`GetSystemMetrics` (already present), and
+the volume interface sits inside `MediaFoundation` itself — the Audio-module
+`IAudioStreamVolume` was never required, because MF exposes
+`MR_POLICY_VOLUME_SERVICE` as a service.
 ---
 
 ## 10. Non-goals
