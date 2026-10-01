@@ -740,3 +740,159 @@ Rules it follows, each one a constraint that already existed elsewhere:
 On the dropped-file path the console closes with the process; on the shell
 path it was the user's terminal all along. Neither case is special-cased,
 which is the whole point.
+
+---
+
+## 13. Phase 6 completion report (M11)
+
+**Declared complete 2026-10-01.** Milestones M0 through M10 have landed and
+M8 was signed off by a person at a real machine — every group of its
+checklist, twice. The field list follows the completion-report template
+`ARCHIVE_BACKEND.md` step 10 set for Phase 4, adapted to a viewer. Nothing
+below claims a capability that was not built and observed.
+
+### 13.1 Formats actually enabled
+
+`.jpg` `.jpeg` `.png` `.bmp` `.gif`, decoded by WIC — the decoder Windows
+already ships, so **zero codec dependencies were added** (§2). Multi-frame
+files are shown as their first frame (`GetFrame(0)`); animation is not a
+Phase 6 feature. Verified against the committed corpus — seven samples from
+7x5 up to 320x200, including one deliberately truncated PNG — plus
+real-machine viewing of a picture larger than the display.
+
+### 13.2 Operations actually supported
+
+```text
+open        drop on the exe, or any command line; console summary first
+zoom        wheel, five rungs 0.25 / 0.5 / 1 / 2 / 4, halftone when shrinking
+pan         left-drag, mouse captured, bounds decided by platform::image::pan
+previous    left/right arrows, wrapping, stepping over pictures that will
+next        not decode; the window, title and console follow each landing
+close       title-bar cross, Alt+F4, an outside WM_CLOSE — exit 0
+console     the §12 summary once, then one "→ ..." line per step, append-only
+refusals    exit 2 / 3 / 4 / 6, measured as real processes on both platforms
+sizing      a window never larger than half the screen, per axis
+foreground  the viewer asks for the foreground, focus included
+```
+
+### 13.3 Native dependencies
+
+One crate family: `windows` **0.62.2** and the fourteen crates its surface
+splits into — **15 external crates, counted by `cargo tree`, and no other
+dependency of any kind**. No native library is built, bundled or shipped
+beyond what Windows itself provides (WIC, GDI, Win32); no `build.rs` step
+belongs to this feature at all. `Cargo.lock` was written once in M0 and has
+not been touched since — the two features accepted during Phase 6 each cost
+zero crates, and the two alternatives refused are recorded in §6.
+
+### 13.4 Binary-size delta
+
+```text
+--all-features    664,064  →  709,120    +45,056  (+6.8%)
+without features  189,952  →  206,848    +16,896  (+8.9%)
+```
+
+Every byte of the second row arrived in M0 and no later milestone moved it:
+the viewer costs a build that never asked for it **nothing** (§9 holds the
+per-milestone table; §3 is what arranged that).
+
+### 13.5 Tests executed
+
+```text
+Windows   150 all-features / 109 without features      fmt + clippy, both, green
+Linux     133 all-features / 108 without features      same four commands, green
+CI        three jobs (windows, ubuntu, MSRV) — five consecutive pushes green,
+          1m0s–1m17s each, runs 36846171137..36854155085, latest on 1a7e433
+```
+
+Beyond `cargo test`: the source guard (`platform_boundary.rs`) that fails the
+build if a Windows type reaches the portable layers, and the manual smokes —
+M5 pan 8 checks, M6 browsing 15, M7 stepping-over 16, M8's console contract
+3 (PowerShell waits 1,689 ms with `$LASTEXITCODE=0`; cmd 1,651 ms with
+`%ERRORLEVEL%=0`; the CI redirect replay returns 2 with the `Error: ` prefix),
+the Z-order/focus state checks, and the shrink comparison (adjacent-pixel
+energy **1032 → 254**).
+
+### 13.6 Safety cases covered
+
+- **No panic on anything a user can choose (§23)**: a truncated PNG, a file
+  that is not an image, a missing path, a directory, an empty command line,
+  a zero-sized screen, an index outside its set, an `i32` size that would
+  overflow, a path with an interior NUL — each is asserted to produce a
+  number and a sentence, on both platforms.
+- **Media treated as untrusted (§30)**: WIC sits behind the decode boundary;
+  its failures are translated in one place (`decode.rs`) into §24's codes;
+  a picture that will not decode before a window exists produces no window.
+- **Exit-code stability (§24)**: asserted as *real processes* in
+  `tests/image.rs`, not merely by calling `err.exit_code()` in-process.
+- **The platform boundary**: enforced by reading the sources — `cfg`'d-out
+  code is never compiled on Linux, so the compiler alone could not catch a
+  leak (§3).
+- **All `unsafe` of the milestone lives in `viewer.rs`**, documented per
+  block under `clippy::undocumented_unsafe_blocks` (§7).
+
+### 13.7 Decisions made, and decisions refused
+
+Settled at the start (2026-09-29): windows-rs over hand-written bindings
+for ABI correctness; WIC + GDI with Direct2D deliberately unused; previous/
+next wraps as a Toss-owned rule with 0/1/N tests; no delegate trait; the
+floor is Windows 10 22H2 / build 19045.
+
+Accepted later, each with measurements: `Win32_UI_Input_KeyboardAndMouse`
+for capture (M5, zero crates, zero lock change). Refused, each with
+measurements: `#![windows_subsystem = "windows"]` (PowerShell returned in
+12 ms with no `$LASTEXITCODE` — §24 would have broken); hand-written
+`extern "system"` declarations (the precedent, not the ABI, was the problem);
+hiding the console (`Win32_System_Console` was added, then withdrawn when
+real hardware showed the flash it could not avoid — §6 carries both halves);
+and the console stayed a companion instead (§12).
+
+Observed and decided not to chase: the flash between zoom levels, which
+HoneyView shows too — recorded as a decision with its known cure (§8).
+
+### 13.8 Milestone ledger
+
+```text
+M0  471cab1  the boundary: ViewRequest, source guard, dispatch arm
+M1  0d78668  the window: create, pump, WM_CLOSE, exit 0
+M2  0ea8620  WIC decode before any window exists, corpus of 7 samples
+M3  cd18c54  first render (StretchDIBits) + GWLP_USERDATA state binding
+M4  57198da  zoom: the wheel over platform::image::zoom's five rungs
+M5  ba2b530  pan: the drag, captured, over platform::image::pan's bounds
+M6  1d1a9ac  previous/next: arrows, wrap, 0/1/N tested through nav
+M7  15c06cf  errors: corrupt=6, unsupported=3, and stepping over in-browse
+M8  8c35ae8..1a7e433   seven commits, all from real-machine reports:
+    flicker, console companion, console follows the arrows, foreground,
+    half-screen cap + halftone shrink, and the two records
+M9  (no code)  Linux verification: the four commands, the exit-3 red line
+M10 dd77603  this measurement, closed out in §9
+```
+
+### 13.9 Known limitations
+
+- **No fit-to-window**: the picture is drawn at 100% and the window shows
+  part of it when it is large (§11's "not yet"). Together with the zoom
+  ladder's one-notch-per-doubling, this is the pool's "spacing is too big"
+  complaint — a **zoom slider** is the recorded direction, and it will move
+  the Toss-owned ladder, so it arrives with a decision of its own.
+- **Zoom anchor is the top-left corner**, not under the pointer.
+- **No cursor feedback while dragging** (hand or move cursor) — `IDC_HAND`
+  and `WM_SETCURSOR` are inside the already-enabled feature, so this one
+  costs no dependency decision, only the work.
+- **Zooming flashes** — decided against for now (§8), with double buffering
+  written down as the known cure and its ~183 MiB cost for an 8K image.
+- **`StretchDIBits`' return is still swallowed** in `render` (M4's comment
+  stands): a draw that fails reports nothing. M7 gave *decode* a real error
+  path, not the blit.
+- **A set of one picture is silent**: arrows land and nothing moves, which
+  §5 requires and a person has already mistaken for a bug once.
+- **Linux shows no pictures**: `toss <image>` there is exit 3 by design
+  (§8), which is the portability guard rather than a viewer.
+
+### 13.10 Future capability gaps
+
+A zoom slider; a cursor that shows the drag; the anchor under the pointer;
+fit-to-window; double buffering if the flash is ever judged worth its
+memory; frame-by-frame animation; and — when Phase 8 says so — a second
+backend implementing this same boundary for another platform. Phase 7 media
+work is out of scope here (§10) and has not been started.
