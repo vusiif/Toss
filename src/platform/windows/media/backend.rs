@@ -13,17 +13,18 @@
 use std::path::Path;
 use std::ptr;
 
-use windows::Win32::Foundation::HWND;
+use windows::Win32::Foundation::{E_NOINTERFACE, HWND};
 use windows::Win32::Media::MediaFoundation::{
     IMFMediaSession, IMFMediaSource, IMFPresentationDescriptor, IMFSimpleAudioVolume,
-    IMFStreamDescriptor, IMFTopology, MEDIA_EVENT_GENERATOR_GET_EVENT_FLAGS, MEEndOfPresentation,
-    MESessionClosed, MF_OBJECT_TYPE, MF_PD_DURATION, MF_RESOLUTION_MEDIASOURCE,
-    MF_TOPOLOGY_OUTPUT_NODE, MF_TOPOLOGY_SOURCESTREAM_NODE, MF_TOPONODE_NOSHUTDOWN_ON_REMOVE,
-    MF_TOPONODE_PRESENTATION_DESCRIPTOR, MF_TOPONODE_SOURCE, MF_TOPONODE_STREAM_DESCRIPTOR,
-    MF_VERSION, MFCreateAudioRendererActivate, MFCreateMediaSession, MFCreateSourceResolver,
-    MFCreateTopology, MFCreateTopologyNode, MFCreateVideoRendererActivate, MFGetService,
-    MFMediaType_Audio, MFMediaType_Video, MFSTARTUP_FULL, MFShutdown, MFStartup,
-    MR_POLICY_VOLUME_SERVICE,
+    IMFStreamDescriptor, IMFTopology, IMFVideoDisplayControl,
+    MEDIA_EVENT_GENERATOR_GET_EVENT_FLAGS, MEEndOfPresentation, MESessionClosed,
+    MF_E_UNSUPPORTED_SERVICE, MF_EVENT_FLAG_NO_WAIT, MF_OBJECT_TYPE, MF_PD_DURATION,
+    MF_RESOLUTION_MEDIASOURCE, MF_TOPOLOGY_OUTPUT_NODE, MF_TOPOLOGY_SOURCESTREAM_NODE,
+    MF_TOPONODE_NOSHUTDOWN_ON_REMOVE, MF_TOPONODE_PRESENTATION_DESCRIPTOR, MF_TOPONODE_SOURCE,
+    MF_TOPONODE_STREAM_DESCRIPTOR, MF_VERSION, MFCreateAudioRendererActivate, MFCreateMediaSession,
+    MFCreateSourceResolver, MFCreateTopology, MFCreateTopologyNode, MFCreateVideoRendererActivate,
+    MFGetService, MFMediaType_Audio, MFMediaType_Video, MFSTARTUP_FULL, MFShutdown, MFStartup,
+    MR_POLICY_VOLUME_SERVICE, MR_VIDEO_RENDER_SERVICE,
 };
 use windows::Win32::System::Com::StructuredStorage::PROPVARIANT;
 use windows::Win32::System::Variant::VT_I8;
@@ -47,39 +48,83 @@ pub(super) fn play(path: &Path) -> Result<(), TossError> {
 
     let (descriptor, planned, duration) = probe(path, &source)?;
     let duration = duration.min(i64::MAX as u64) as i64;
-    let has_video = planned.iter().any(|stream| stream.video);
 
-    let session = Session::new(path)?;
-
-    if has_video {
-        // The video path. The window exists because the EVR needs one —
-        // `MFCreateVideoRendererActivate` takes an hwnd and there is no
-        // video without that — and the event pump runs off the window's
-        // timer, because video also needs a message pump to refresh at all.
-        // Keyboard controls are P7-C; what stops this play in the meantime
-        // is the end of the presentation or the title-bar cross.
-        let window = super::player::Window::new(path)?;
-        let topology = topology(path, &source, &descriptor, &planned, Some(window.handle()))?;
-        start(&session, path, &topology)?;
-
-        // Blocks until the window is gone — the presentation's end destroys
-        // it, and so does the cross — and surfaces any failure the event
-        // pump recorded on its way.
-        super::player::run(window, session.inner.clone(), path, duration)?;
-
-        session.close(path)?;
-    } else {
-        // Audio only: no window at all, and the blocking pump P7-A proved.
-        // D2's "an audio file gets no dummy window" stays true by *not
-        // taking the video path*, rather than by hiding one.
-        let topology = topology(path, &source, &descriptor, &planned, None)?;
-        start(&session, path, &topology)?;
-
+    if !planned.iter().any(|stream| stream.video) {
+        // Audio only: one stream, one topology, the blocking pump P7-A
+        // proved — no window (D2), and nothing to degrade *to* either.
+        let session = Session::new(path)?;
+        let built = topology(path, &source, &descriptor, &planned, None)?;
+        start(&session, path, &built)?;
         session.wait_for(path, MEEndOfPresentation.0 as u32, false)?;
         session.close(path)?;
+        return Ok(());
     }
 
-    Ok(())
+    // Video, with the lesson of a real file: 10.8 GB of H.264 carrying a
+    // DTS-HD MA track. Windows ships no DTS decoder, so the full topology
+    // failed with MF_E_TOPO_CODEC_NOT_FOUND — condemning a picture that was
+    // perfectly playable. The rule is the project's own: give the input the
+    // safest useful answer. Every stream first; if the machine cannot
+    // decode one of them, drop to the video alone and play what is there.
+    // Only when *that* fails does anything get reported, and it reports as
+    // §24's 3 — no decoder here, not a damaged file.
+    let video_only: Vec<PlannedStream> = planned.iter().filter(|s| s.video).cloned().collect();
+    let attempts: [&[PlannedStream]; 2] = [&planned, &video_only];
+    let mut last: Option<TossError> = None;
+
+    for (attempt, subset) in attempts.iter().enumerate() {
+        if subset.is_empty() {
+            continue;
+        }
+
+        // A fresh session each time: one that has already seen a failed
+        // topology is not a clean slate for the next attempt, and the old
+        // `Session`'s `Drop` closes whatever it was carrying.
+        let session = Session::new(path)?;
+
+        // A window per attempt: the previous attempt's window died with
+        // its `run`, and a destroyed handle cannot host a message loop —
+        // which is how the first version of this loop hung for ever
+        // waiting for a quit nobody left behind.
+        let window = super::player::Window::new(path)?;
+
+        let built = match topology(path, &source, &descriptor, subset, Some(window.handle())) {
+            Ok(built) => built,
+            Err(err) => {
+                last = Some(err);
+                continue;
+            }
+        };
+
+        if let Err(err) = start(&session, path, &built) {
+            last = Some(err);
+            continue;
+        }
+
+        match super::player::run(&window, session.inner.clone(), path, duration) {
+            Ok(()) => {
+                session.close(path)?;
+                return Ok(());
+            }
+            // Only "this machine cannot play that" earns the second attempt
+            // — that is exactly what `from_hresult` files as
+            // `UnsupportedFormat`. Anything else is the real verdict and is
+            // handed straight back.
+            Err(err) => {
+                let degrade =
+                    matches!(err, TossError::UnsupportedFormat(_)) && attempt + 1 < attempts.len();
+                if degrade {
+                    last = Some(err);
+                    continue;
+                }
+                return Err(err);
+            }
+        }
+    }
+
+    Err(last.unwrap_or_else(|| {
+        TossError::other("no stream of this file could be prepared for playback")
+    }))
 }
 
 /// Hand over the topology, then start from the beginning.
@@ -210,6 +255,45 @@ impl Session {
         }
     }
 
+    /// Orderly shutdown: ask, then wait until the session confirms — for a
+    /// while.
+    ///
+    /// `MFMediaSession::Close` is asynchronous and the confirmation is
+    /// *supposed* to arrive, but "supposed to" is not a guarantee this
+    /// process should bet its lifetime on: a session that never confirms
+    /// would leave Toss alive for ever with nothing on screen. The official
+    /// Microsoft sample waits five seconds and then moves on; so does this,
+    /// for the same reason. Events that arrive during the wait with a
+    /// failing status are the noise of closing (the P7-C rule) and are
+    /// ignored here.
+    fn wait_for_closed(&self, path: &Path) -> Result<(), TossError> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+
+        loop {
+            // SAFETY: the session is alive and owned by this wrapper; a
+            // non-blocking read either hands over an event we own or says
+            // there is none.
+            if let Ok(event) = unsafe { self.inner.GetEvent(MF_EVENT_FLAG_NO_WAIT) } {
+                // SAFETY: both calls only read the event.
+                let status = unsafe { event.GetStatus() }
+                    .map_err(|err| super::failed(path, "read an event's status", err))?;
+                // SAFETY: as above — reading the event, which this
+                // loop owns until it drops.
+                let kind = unsafe { event.GetType() }
+                    .map_err(|err| super::failed(path, "read a media event", err))?;
+
+                if status.is_ok() && kind == MESessionClosed.0 as u32 {
+                    return Ok(());
+                }
+            }
+
+            if std::time::Instant::now() >= deadline {
+                return Ok(());
+            }
+
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
     /// Orderly shutdown: ask, then wait until the session confirms.
     fn close(&self, path: &Path) -> Result<(), TossError> {
         // SAFETY: the session is alive, and closing it is the operation its
@@ -220,7 +304,7 @@ impl Session {
                 .map_err(|err| super::failed(path, "close the playback session", err))?;
         }
 
-        self.wait_for(path, MESessionClosed.0 as u32, true)
+        self.wait_for_closed(path)
     }
 }
 
@@ -261,6 +345,89 @@ fn simple_audio_volume(
 /// the variant type in the header, the value in the union behind it. The
 /// zeroed default is VT_EMPTY — "no position", which is what `resume`
 /// uses; this is the same structure with a position written into it.
+/// The video display control, through MF's service lookup — the object that
+/// owns how and where the picture is drawn, and the only sanctioned way to
+/// make it full screen.
+fn video_display(
+    path: &Path,
+    session: &IMFMediaSession,
+) -> Result<Option<IMFVideoDisplayControl>, TossError> {
+    let mut raw = std::ptr::null_mut();
+
+    // SAFETY: `raw` is local out-storage; the IID is the interface asked
+    // for, so the pointer that comes back is that interface, and `from_raw`
+    // takes over the single reference — released when the value drops.
+    unsafe {
+        match MFGetService(
+            session,
+            &MR_VIDEO_RENDER_SERVICE,
+            &IMFVideoDisplayControl::IID,
+            &mut raw,
+        ) {
+            Ok(()) => Ok(Some(IMFVideoDisplayControl::from_raw(raw))),
+            // "There is no video display here" is the documented answer for
+            // a source without video — Microsoft Learn's own note on this
+            // call. On such a file F does nothing, which is D2: fullscreen
+            // is listed against *video*.
+            Err(err) if err.code() == MF_E_UNSUPPORTED_SERVICE || err.code() == E_NOINTERFACE => {
+                Ok(None)
+            }
+            // Anything else on a file that *does* have video is a real
+            // failure and is not swallowed: an earlier version returned a
+            // silent no-op here, which turned "F does nothing" into an
+            // unfindable bug.
+            Err(err) => Err(super::failed(path, "reach the video display", err)),
+        }
+    }
+}
+
+/// Whether full screen is on, as the renderer itself sees it.
+///
+/// The transition is asynchronous (Microsoft Learn), so this asks rather
+/// than remembers: the renderer is the truth about its own mode.
+pub(super) fn fullscreen_active(session: &IMFMediaSession, path: &Path) -> Result<bool, TossError> {
+    let display = match video_display(path, session)? {
+        Some(display) => display,
+        // No video, so no full screen to ask about.
+        None => return Ok(false),
+    };
+
+    // SAFETY: the control is owned for this call.
+    let active = unsafe { display.GetFullscreen() }
+        .map_err(|err| super::failed(path, "read the full-screen state", err))?;
+
+    Ok(active.as_bool())
+}
+
+/// Hand full screen to the renderer, or take it back.
+///
+/// The renderer's half of the operation only: it switches its own
+/// presentation into D3D exclusive mode and back (and, per the same
+/// document, the *application* must then cover the monitor with its window,
+/// go topmost and take the focus — which is the player's job, where window
+/// management belongs). A source with no video has no display control to
+/// ask: Microsoft Learn says this call "is expected to fail if the source
+/// does not have video", so on an audio file this is a no-op, matching D2 —
+/// fullscreen is listed against *video*.
+pub(super) fn set_fullscreen(
+    session: &IMFMediaSession,
+    path: &Path,
+    on: bool,
+) -> Result<bool, TossError> {
+    let display = match video_display(path, session)? {
+        Some(display) => display,
+        None => return Ok(false),
+    };
+
+    // SAFETY: the control is owned for this call; `on` is the documented
+    // argument.
+    unsafe { display.SetFullscreen(on) }
+        .map_err(|err| super::failed(path, "set full screen", err))?;
+
+    // True: the renderer took the switch. False: there was no video
+    // to switch, and the caller must not move a window on its behalf.
+    Ok(true)
+}
 fn position_at(target: i64) -> PROPVARIANT {
     let mut position = PROPVARIANT::default();
 
@@ -342,6 +509,7 @@ fn open_source(path: &Path) -> Result<IMFMediaSource, TossError> {
 /// renderer's window comes from before any node is built, because a file
 /// with video in it is the whole reason a window exists (D2: an audio-only
 /// file gets no dummy window).
+#[derive(Clone, Debug)]
 pub(super) struct PlannedStream {
     pub(super) index: u32,
     pub(super) video: bool,

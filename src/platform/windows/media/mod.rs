@@ -12,7 +12,7 @@ use std::path::Path;
 
 use windows::Win32::Media::MediaFoundation::{
     MF_E_CANNOT_PARSE_BYTESTREAM, MF_E_INVALIDMEDIATYPE, MF_E_NO_MORE_TYPES,
-    MF_E_UNSUPPORTED_BYTESTREAM_TYPE,
+    MF_E_TOPO_CODEC_NOT_FOUND, MF_E_TOPO_UNSUPPORTED, MF_E_UNSUPPORTED_BYTESTREAM_TYPE,
 };
 use windows::core::{Error, HRESULT};
 
@@ -84,10 +84,18 @@ fn from_hresult(path: &Path, step: &str, code: HRESULT) -> TossError {
         return TossError::InputNotFound(path.to_path_buf());
     }
 
+    // Three kinds of "no": the bytes are not a format we know, the
+    // stream cannot be parsed — and, added after a real 10.8 GB movie was
+    // refused: **this machine has no decoder for that stream**. The last
+    // one is the machine talking ("your Windows lacks DTS"), not the file
+    // being damaged, so it belongs to 3 with the others: §24's unsupported
+    // format, never 6.
     if code == MF_E_UNSUPPORTED_BYTESTREAM_TYPE
         || code == MF_E_CANNOT_PARSE_BYTESTREAM
         || code == MF_E_NO_MORE_TYPES
         || code == MF_E_INVALIDMEDIATYPE
+        || code == MF_E_TOPO_CODEC_NOT_FOUND
+        || code == MF_E_TOPO_UNSUPPORTED
     {
         return TossError::UnsupportedFormat(path.to_path_buf());
     }

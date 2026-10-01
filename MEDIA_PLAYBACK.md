@@ -457,6 +457,27 @@ sink-side complaint ("these stream sinks are fixed, do not add or remove
 them") — when a topology asks a fixed sink for a stream it does not have,
 this is what it says.
 
+
+### Unresolved compatibility case: `E:\Movie\教室别恋...mkv` (6.92 GB)
+
+Kept as the user's real-world sample and **not** worked around
+(`MEDIA_PLAYBACK.md` is also where the "no more MF special cases" ruling
+lives):
+
+```text
+the file is HEVC (ffprobe: hevc, level 4.1, yuv420p) + DTS/AC3 audio
+both the full topology and the video-only retry answer
+    MF_E_TOPO_CODEC_NOT_FOUND  ->  exit 3 "unsupported format"
+C:\Windows\System32 ships no *hevc* decoder file
+a video-only remux (-c copy, no re-encode) fails identically
+    -> the container, the multi-track layout and the retry are exonerated
+```
+
+So the verdict is what §2's limitation already says: **the machine has no
+software HEVC decoder**, and Toss reports that as §24's 3 rather than as a
+damaged file. What would change it — a bundled software decoder, hardware
+MFTs — is exactly the Phase 7 capability investigation, and is not a reason
+to add a branch here.
 ### Measured data (release, `--locked`, both feature sets)
 
 | milestone | `--all-features` | without features | change |
@@ -534,6 +555,53 @@ the volume interface sits inside `MediaFoundation` itself — the Audio-module
 `MR_POLICY_VOLUME_SERVICE` as a service.
 ---
 
+### P7-B closure round (2026-10-01)
+
+The follow-up after the three-bug fix landed, driven by the real-machine
+report and finished before any codec investigation began:
+
+```text
+temp event logging removed          the diagnostics earned their keep and left
+8-format regression                 wav mp3 flac mp4 mkv webm avi mov = exit 0,
+                                    truncated.mp4 = exit 6
+p7c smoke (three runs)              8/8: pause/resume, fullscreen, seek-past-end,
+                                    volume keys, Esc
+audio-only files                    no window for the whole playback (D2), exit 0
+F = fullscreen                      window covers the monitor exactly
+                                    (2560x1440 measured), restores its previous
+                                    geometry on the second press, Esc exits 0
+fmt + clippy (both) + tests         Windows and Linux, both feature sets, green
+```
+
+**Full screen, done the way the API prescribes.** `SetFullscreen` switches
+the *renderer* into D3D exclusive mode; the application, by the same
+document's words, must "resize the video window to cover the entire area of
+the monitor", make it topmost and give it the focus — restoring the geometry
+on the way out. That split is now what the code does: the backend owns the
+switch, the player owns the geometry, and **the window style is never
+touched** — driving it to `WS_POPUP` was what made the first attempt's edges
+look like another operating system's. The renderer's transition is
+asynchronous (measured: settled between 0.3s and 1.2s), so anything reading
+the rectangle has to wait for it.
+
+**Volume is best-effort.** `MR_POLICY_VOLUME_SERVICE` answered
+`E_NOINTERFACE` in one measured state, and a level Toss cannot adjust is not
+a reason to stop someone's playback: the key now does nothing rather than
+ending the session. The console companion will have a place to say so when
+it exists.
+
+**One observation, recorded not fixed:** after a fullscreen round trip
+(EVR in and out of exclusive mode), a *subsequent* instance's clean close
+took longer than the usual ~1.3s — within a 12-second budget, but past the
+8-second one a probe first allowed. Slow, not stuck; worth noticing if a
+future probe starts timing closes.
+
+**EVR is legacy, and Microsoft says so.** Every page touched in this work
+carries the banner recommending `IMFMediaEngine` or `MediaPlayer` for new
+code. The Media Session + EVR path Toss is on remains functional and is what
+D1 chose, but the recommendation belongs on the record before Phase 8 or a
+renderer change reopens the question — it is a *documented* migration path,
+not a surprise for later.
 ## 10. Non-goals
 
 Repeated because they are what gets added "while we are in here":
