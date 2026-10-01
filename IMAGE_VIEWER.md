@@ -512,6 +512,23 @@ than proving this call is what provides it. The report came from the
 drop-an-image-on-the-exe path, which no probe in this repository can start;
 whether the call settles that path is a person's next look.
 
+**Also observed, and deliberately not chased this round: the picture
+flashing between zoom levels.** When a notch changes the ladder, the zoom
+path invalidates with `bErase = TRUE` — it has to, because shrinking really
+does leave pixels nobody covers any more — and for as long as that clear
+plus the redraw of a large picture (now halftoned, therefore slower) takes,
+the window shows background. The person who reported it compared against
+HoneyView and found it there too, and called it: *not worth chasing*. That
+is recorded as a decision, not as a limitation.
+
+For whoever picks it up later: the mechanism above is the whole of it, and
+the known cure is **double buffering** — draw into a memory DC and blit the
+finished frame once, so nobody ever sees the cleared state. It is not free
+on the pictures this viewer exists for: a memory DC sized to an 8000×6000
+image is ~183 MiB before a pixel is drawn, and a smaller blit-target changes
+the arithmetic rather than deleting it. Untested here, therefore not claimed
+— but "not solved" is not the same as "unsolvable".
+
 **The console contract, checked with numbers** (three of the four checks run
 on their own, the fourth is a person):
 
