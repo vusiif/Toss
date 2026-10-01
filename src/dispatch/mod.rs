@@ -4,10 +4,10 @@
 //! the caller gave us, classify each one, then hand it to whichever handler
 //! claims it.
 //!
-//! Archives and directories are routed to their handlers; images, media and
-//! anything unclassified fall through to the info fallback, and that fallback
-//! is the point: `toss <anything>` must stay useful rather than answer
-//! "unsupported file" (§7). The report says what the input is; the error line
+//! Archives, directories, images and media are routed to their handlers;
+//! anything unclassified falls through to the info fallback, and that
+//! fallback is the point: `toss <anything>` must stay useful rather than
+//! answer "unsupported file" (§7). The report says what the input is; the error line
 //! says which default action could not be performed, so nothing is claimed
 //! that did not happen (§5, §24).
 
@@ -79,6 +79,11 @@ fn route(verb: Option<Verb>, input: &Input, kind: Kind) -> Result<(), TossError>
         // whether the input is something a directory packer can use (§4.2).
         Some(Verb::Pack) => crate::handlers::directory::compress(input.path()),
 
+        // `toss play movie.mkv` — the verb states the action outright, so it
+        // goes to the handler that performs it; the handler decides whether
+        // the input is something that can be played (§4.2).
+        Some(Verb::Play) => crate::handlers::media::play(input.path()),
+
         // `toss view photo.jpg` — same again; the handler decides whether the
         // input is something a viewer can open (§4.2).
         //
@@ -104,6 +109,11 @@ fn route(verb: Option<Verb>, input: &Input, kind: Kind) -> Result<(), TossError>
 
             // `toss folder/` — §18.2's default action for a directory.
             Kind::Directory => crate::handlers::directory::compress(input.path()),
+
+            // `toss movie.mkv` — §18.4's default action for a media file.
+            // What "play" means is the platform's answer; whether the input
+            // can be played at all is decided before that, here.
+            Kind::Media => crate::handlers::media::play(input.path()),
 
             // `toss photo.jpg` — §18.3's default action for an image. What the
             // viewer does with it is the platform's answer; whether it is an
@@ -285,23 +295,26 @@ mod tests {
     }
 
     #[test]
-    fn a_kind_with_a_default_action_states_the_action_it_could_not_perform() {
-        // `Kind::Archive`, `Kind::Directory` and `Kind::Image` are absent on
-        // purpose: all three are wired to handlers now, so none of them
-        // reports a missing action.
+    fn a_media_kind_reaches_its_handler_and_is_refused_before_any_media_code_runs() {
+        // Every kind with a default action is wired to a handler now, so no
+        // input reaches "there is no handler for this" any more; what each
+        // arm is covered by instead is its *handler's* refusal, on an input
+        // that turns back before any platform code could run — a directory,
+        // which is not a file.
         //
-        // `Kind::Image` needs more than omission, though. On Windows with the
-        // `image` feature its handler opens a real window and blocks in the
-        // message loop, which is the last thing a unit test may do — so that
-        // arm is covered by the test below instead, on an input that refuses
-        // before any window could be reached.
-        let err = route(None, &Input::File(manifest("Cargo.toml")), Kind::Media)
-            .expect_err("there is no media player yet");
+        // It has to be that kind of input on every platform: on Windows with
+        // the `media` feature the handler would otherwise hand a file to
+        // Media Foundation, whose answer (and therefore whose exit code and
+        // message) depends on what MF makes of the bytes — while the point
+        // here is the arm, not the backend. The image arm is covered the
+        // same way below, for the same reason plus a window.
+        let err = route(None, &Input::Directory(manifest("src")), Kind::Media)
+            .expect_err("a folder is not a media file");
 
-        assert_eq!(err.exit_code(), ExitCode::UnsupportedFormat);
+        assert_eq!(err.exit_code(), ExitCode::InvalidArguments);
         assert!(
-            err.to_string().contains("media playback"),
-            "expected media playback in: {err}"
+            err.to_string().contains("not a media file"),
+            "expected the handler's own complaint, got: {err}"
         );
     }
 

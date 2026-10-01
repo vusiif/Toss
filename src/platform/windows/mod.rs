@@ -11,7 +11,11 @@
 //!
 //! Nothing declared here is reachable from outside `platform/` — that is what
 //! makes the boundary in `IMAGE_VIEWER.md` §3 a boundary rather than a
-//! convention. Phase 6 fills `image`; Phase 8 looks at the rest.
+//! convention. Phase 6 fills `image`; Phase 7 fills `media`; Phase 8 looks
+//! at the rest.
 
 #[cfg(feature = "image")]
 pub mod image;
+
+#[cfg(feature = "media")]
+pub mod media;

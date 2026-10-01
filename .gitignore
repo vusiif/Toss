@@ -8,12 +8,14 @@
 
 # Documentation — only the files whitelisted here are version-controlled.
 # Everything else (*.md notes, docs/, doc/) stays out of commits.
-# ARCHIVE_BACKEND.md and IMAGE_VIEWER.md are whitelisted because they
-# constrain future agents; a rule nobody can see after cloning is not a rule.
+# ARCHIVE_BACKEND.md, IMAGE_VIEWER.md and MEDIA_PLAYBACK.md are whitelisted
+# because they constrain future agents; a rule nobody can see after cloning
+# is not a rule.
 *.md
 !README.md
 !ARCHIVE_BACKEND.md
 !IMAGE_VIEWER.md
+!MEDIA_PLAYBACK.md
 docs/
 doc/
 

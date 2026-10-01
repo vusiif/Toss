@@ -12,6 +12,7 @@
 //! Phases 6 through 8 fill this module.
 
 pub mod image;
+pub mod media;
 pub mod portable;
 
 #[cfg(target_os = "windows")]
