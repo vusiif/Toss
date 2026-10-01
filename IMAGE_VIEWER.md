@@ -77,6 +77,31 @@ Until that day: **no D2D-shaped abstraction is written "in case".** When and
 if the renderer changes, the platform boundary (§3) is what protects the
 layers above; nothing above `platform::image` may need to change.
 
+Two decisions were made *inside* GDI once the viewer met real pictures.
+Both answer to what a person sees, and both stay behind this same boundary:
+
+- **Halftone stretching, when shrinking only.** GDI's default mode scales a
+  picture down by *discarding* samples — every other row, every other column
+  — and a large image shrunk that way grows a lattice of false detail over
+  anything fine: the moire reported against M8. `SetStretchBltMode(HALFTONE)`
+  averages instead, with the brush origin set beside it as that API
+  requires. It is applied **only when the destination is smaller than the
+  source**: enlarging and one-to-one have no samples to drop, and M4's
+  enlargement is an assertion someone can read — its smoke checks that the
+  corner colour survives two zooms, which halftoning would smear. Measured,
+  one row of `panel.png` at the 0.25 level, summed adjacent-pixel
+  differences: **1032** with the default mode, **254** with halftone.
+- **A window is never larger than half the screen.** A picture bigger than
+  the display used to ask for a window bigger than the display — the frame,
+  its edges and most of the picture off-screen where no drag could reach
+  them. Each axis is capped independently at half the primary screen, which
+  is also what leaves room for the console of §12 on the same display, and
+  everything past the cap is what panning (M5) exists for. Where the cap
+  bites, M3's "client rectangle matches the picture" gives way
+  deliberately: the picture is drawn one to one and the window shows part of
+  it. Fit-*to*-window — scaling the *picture* to the window — remains §11's
+  "not yet".
+
 ---
 
 ## 3. Platform boundary
@@ -542,13 +567,17 @@ milestone rather than accumulated:
 | M5, pan | 695,808 | 206,848 | +1,536 / 0 |
 | M6, previous / next | 698,880 | 206,848 | +3,072 / 0 |
 | M7, error handling | 700,928 | 206,848 | +2,048 / 0 |
-| M8, the console beside the window | 708,096 | 206,848 | +7,168 / 0 |
+| M8, the console beside the window and its presentation | 709,120 | 206,848 | +8,192 / 0 |
 
-M8's row is the `summary` of §12 and its fields — a format name, a byte
-count and four lines of controls. The drag-flicker fix in the same milestone
-moved nothing, and the console-hiding experiment (§6) that was built and
-withdrawn inside it is why the row after M7 is +7,168 rather than two
-changes stacked.
+M8's row is a sum, not a single change: the milestone ran on real-machine
+reports and landed six times. Measured at the two ends rather than commit by
+commit — **700,928 → 709,120, +8,192 in total**. Individually measured
+within it: the §12 `summary` **+7,168** (the largest part), the foreground
+request **+1,024**, while the drag-flicker fix, the console-hiding
+experiment built and withdrawn inside this same milestone (§6), the
+half-screen cap and halftone shrinking each came back **+0**. The remaining
+commits between those measurements were not sized separately, so this table
+does not attribute their share.
 
 Plus, from the §6 spike: `windows-rs` floor **+4,096 B**, transitive crates
 **+15**.

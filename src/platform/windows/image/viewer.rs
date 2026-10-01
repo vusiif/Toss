@@ -10,8 +10,8 @@ use std::mem::size_of;
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BeginPaint, COLOR_WINDOW, DIB_RGB_COLORS, EndPaint,
-    GetSysColorBrush, HDC, InvalidateRect, PAINTSTRUCT, RGBQUAD, SRCCOPY, StretchDIBits,
-    UpdateWindow,
+    GetSysColorBrush, HALFTONE, HDC, InvalidateRect, PAINTSTRUCT, RGBQUAD, SRCCOPY, SetBrushOrgEx,
+    SetStretchBltMode, StretchDIBits, UpdateWindow,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{
@@ -20,12 +20,12 @@ use windows::Win32::UI::HiDpi::{
 use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture, VK_LEFT, VK_RIGHT};
 use windows::Win32::UI::WindowsAndMessaging::{
     AdjustWindowRectEx, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW,
-    DispatchMessageW, GWLP_USERDATA, GetClientRect, GetMessageW, GetWindowLongPtrW, IDC_ARROW,
-    LoadCursorW, MSG, PostQuitMessage, RegisterClassExW, SW_SHOW, SWP_NOMOVE, SWP_NOZORDER,
-    SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow,
-    TranslateMessage, WM_CAPTURECHANGED, WM_DESTROY, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCDESTROY, WM_PAINT, WNDCLASS_STYLES, WNDCLASSEXW,
-    WS_OVERLAPPEDWINDOW,
+    DispatchMessageW, GWLP_USERDATA, GetClientRect, GetMessageW, GetSystemMetrics,
+    GetWindowLongPtrW, IDC_ARROW, LoadCursorW, MSG, PostQuitMessage, RegisterClassExW, SM_CXSCREEN,
+    SM_CYSCREEN, SW_SHOW, SWP_NOMOVE, SWP_NOZORDER, SetForegroundWindow, SetWindowLongPtrW,
+    SetWindowPos, SetWindowTextW, ShowWindow, TranslateMessage, WM_CAPTURECHANGED, WM_DESTROY,
+    WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCDESTROY, WM_PAINT,
+    WNDCLASS_STYLES, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
 };
 use windows::core::{HSTRING, PCWSTR, w};
 
@@ -226,7 +226,8 @@ fn title_of(request: &ViewRequest) -> HSTRING {
     HSTRING::from(name)
 }
 
-/// The outer window size that leaves the client area exactly `image`-sized.
+/// The outer window size that leaves the client area `image`-sized — capped
+/// at half the screen.
 ///
 /// `CreateWindowExW`'s width and height are the *outer* rectangle, so the
 /// frame would eat the image's bottom and right edge if they were passed
@@ -235,10 +236,20 @@ fn title_of(request: &ViewRequest) -> HSTRING {
 /// image is still drawn one to one and nothing is scaled (IMAGE_VIEWER.md
 /// §11).
 ///
+/// The cap is what stops a picture larger than the display from asking for a
+/// window larger than the display: the frame, its edges and most of the
+/// picture would land off-screen where no drag could reach them. Half the
+/// screen, each axis on its own — half because the console of §12 is on that
+/// screen too, and because everything past the cap is exactly what panning
+/// exists for. Where the cap bites, the client rectangle is *not*
+/// picture-sized: the picture is drawn at one to one and the window shows
+/// part of it. That is the one place the "client matches picture" habit of
+/// M3 relaxes, deliberately, and it is not a sizing bug.
+///
 /// Asked once more whenever browsing lands on a picture of a different size
-/// (`browse`), so the client rectangle keeps matching the picture it shows.
-/// Fit-*to*-window — shrinking the frame around a picture larger than the
-/// screen — remains §11's "not yet".
+/// (`browse`), so a large picture arriving is capped the same way the one it
+/// replaced was. Fit-*to*-window — scaling the picture down to the window —
+/// remains §11's "not yet".
 fn outer_size(image: &Decoded) -> Result<(i32, i32), TossError> {
     let mut frame = RECT {
         left: 0,
@@ -252,7 +263,39 @@ fn outer_size(image: &Decoded) -> Result<(i32, i32), TossError> {
     unsafe { AdjustWindowRectEx(&mut frame, WS_OVERLAPPEDWINDOW, false, Default::default()) }
         .map_err(|err| super::failed("size the window", err))?;
 
-    Ok((frame.right - frame.left, frame.bottom - frame.top))
+    Ok(within_half_screen(
+        (frame.right - frame.left, frame.bottom - frame.top),
+        screen_size(),
+    ))
+}
+
+/// The primary screen's size, as this DPI-aware process measures it.
+///
+/// Set up before anything else in `run`, so these are physical pixels — the
+/// same currency `CreateWindowExW` and the window procedure deal in.
+fn screen_size() -> (i32, i32) {
+    // SAFETY: both calls read a system metric and involve no pointers, no
+    // handles and nothing that can be released by someone else.
+    unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) }
+}
+
+/// Cap `size` at half of `screen`, one axis at a time.
+///
+/// One axis at a time because the two are independent questions — a picture
+/// can be far too wide and perfectly short enough — and because that is the
+/// same way panning decides how far it may travel.
+///
+/// A screen that reports nothing — a session with no display attached, where
+/// the metrics come back zero — must not produce a zero-sized window, so a
+/// cap that is not positive leaves the size exactly as it was. The direction
+/// to fail in is "as before", never "invisible" (§23).
+fn within_half_screen(size: (i32, i32), screen: (i32, i32)) -> (i32, i32) {
+    let cap = (screen.0 / 2, screen.1 / 2);
+
+    (
+        if cap.0 > 0 { size.0.min(cap.0) } else { size.0 },
+        if cap.1 > 0 { size.1.min(cap.1) } else { size.1 },
+    )
 }
 
 /// Install the window procedure under `CLASS_NAME`.
@@ -586,8 +629,9 @@ fn browse(state: &mut ViewerState, window: HWND, forward: bool) {
     // image sits in the corner of a large one's window and a large one is
     // cropped by a frame sized for something else. Keeping the position
     // (`SWP_NOMOVE`) and the stacking order (`SWP_NOZORDER`) means only the
-    // client rectangle follows the picture — which is the M3 invariant every
-    // calculation in this file still assumes.
+    // client rectangle follows the picture — through the same half-screen
+    // cap `outer_size` applies, so a large picture arriving here is sized
+    // exactly as it would have been had it been the one that opened.
     if let Ok((width, height)) = outer_size(&state.image) {
         // SAFETY: `window` is live for the whole message loop, and the
         // flags say the position and z-order arguments are ignored, so the
@@ -636,6 +680,33 @@ fn render(state: &ViewerState, dc: HDC) {
     let source = (image.width as i32, image.height as i32);
     let destination = drawn_size(image, zoom::factor(state.zoom));
     let info = bitmap_info(image);
+
+    // Scale by averaging — but only when shrinking.
+    //
+    // Shrinking a picture with the default mode *discards* samples — every
+    // other row, every other column — and a large image scaled down that way
+    // grows a lattice of false detail across anything fine: the moire
+    // reported against M8. HALFTONE averages the samples it would otherwise
+    // skip, and the API asks for the brush origin to be set alongside it, so
+    // those two lines are one decision rather than two.
+    //
+    // Enlarging and one-to-one are left alone on purpose: there is no
+    // sample to drop when the destination walks the source rather than
+    // skipping it, and M4's enlargement is an assertion someone can read —
+    // its smoke checks that the corner colour survives two zooms, which
+    // halftoning would smear.
+    if destination.0 < source.0 || destination.1 < source.1 {
+        // SAFETY: `dc` came from the `BeginPaint` a line above and stays
+        // valid until `EndPaint`; both calls only set state on it.
+        // `SetStretchBltMode` answers with the previous mode and
+        // `SetBrushOrgEx` with whether it worked — the device context is
+        // discarded with `EndPaint`, so there is nothing to restore and
+        // nowhere either answer needs to go.
+        unsafe {
+            let _ = SetStretchBltMode(dc, HALFTONE);
+            let _ = SetBrushOrgEx(dc, 0, 0, None);
+        }
+    }
 
     // SAFETY: `dc` came from the `BeginPaint` a line above and stays valid
     // until `EndPaint`; `info` describes `pixels`, which live as long as
@@ -754,7 +825,7 @@ mod tests {
     use windows::Win32::Graphics::Gdi::BITMAPINFOHEADER;
 
     use super::super::decode::{Decoded, decode};
-    use super::{bitmap_info, drawn_size, outer_size, point_of};
+    use super::{bitmap_info, drawn_size, outer_size, point_of, within_half_screen};
     use crate::platform::image::{pan, zoom};
 
     fn sample(name: &str) -> PathBuf {
@@ -814,6 +885,31 @@ mod tests {
             height > 5,
             "the vertical frame was not accounted for: {height}"
         );
+    }
+
+    #[test]
+    fn a_window_bigger_than_half_the_screen_comes_down_to_it() {
+        // The report behind the cap: a picture larger than the display asked
+        // for a window larger than the display, and half of both was off the
+        // screen where no drag could reach it (§12's console shares that
+        // screen, which is where "half" comes from).
+        assert_eq!(
+            within_half_screen((7680, 4320), (2560, 1440)),
+            (1280, 720),
+            "an 8K picture on a full-HD screen"
+        );
+
+        // One axis at a time: too tall but perfectly short enough stays
+        // exactly as wide as it asked to be.
+        assert_eq!(within_half_screen((900, 5000), (2560, 1440)), (900, 720));
+
+        // Already inside the limit — every picture a person opens on a
+        // normal screen — is left alone: the cap is a ceiling, not a resize.
+        assert_eq!(within_half_screen((320, 200), (2560, 1440)), (320, 200));
+
+        // A screen that reports nothing must not turn into a window that
+        // shows nothing (§23): the direction to fail in is "as before".
+        assert_eq!(within_half_screen((640, 480), (0, 0)), (640, 480));
     }
 
     #[test]
