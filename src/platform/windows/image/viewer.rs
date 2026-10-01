@@ -429,13 +429,22 @@ unsafe extern "system" fn window_proc(
                 if next != state.origin {
                     state.origin = next;
 
-                    // SAFETY: the window is live and the rectangle is null
-                    // for the whole client area, which is what a drag can
-                    // touch anywhere. The erase flag is kept from the zoom
-                    // path deliberately: an origin can move a picture that
-                    // did not fill the window, and the strip it leaves
-                    // behind has to be cleared rather than smeared.
-                    let _ = InvalidateRect(Some(window), None, true);
+                    // SAFETY: the window is live and a null rectangle means
+                    // the whole client area, which is what a drag can touch
+                    // anywhere.
+                    //
+                    // **No erase** — and that is the whole of M8's flicker
+                    // fix. A drag only ever moves an axis that `pan::clamp`
+                    // gives room on, and it only gives room where the
+                    // picture is *larger* than the window, so on that axis
+                    // the new frame reaches past both edges the old one
+                    // showed and covers it outright; the other axis did not
+                    // move at all. Erasing would blank the client area
+                    // before every single mouse move, which is exactly what
+                    // a drag that flashes looks like. This differs from the
+                    // zoom path on purpose: shrinking there really does
+                    // leave pixels the smaller picture no longer covers.
+                    let _ = InvalidateRect(Some(window), None, false);
                 }
 
                 LRESULT(0)

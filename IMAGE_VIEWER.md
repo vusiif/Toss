@@ -417,6 +417,16 @@ A real desktop session is still what M8 signs off: it catches what no probe
 does — a window that opens behind others, a cursor that never changes, a
 picture that is present but wrong in a way nobody thought to sample.
 
+**M8's first sitting proved the point.** A person dragging the picture saw
+it **flash**; every probe so far, including the one that reads pixels back
+out of the device context, passed. The cause was one argument: the drag path
+invalidated with `bErase = TRUE`, blanking the client area before every
+single mouse move — while the picture, only ever moving on an axis it is
+larger than the window, covers everything the old frame showed anyway. The
+zoom path keeps its erase for a real reason (shrinking leaves pixels nobody
+covers), so the fix is per-path, not global. A `GetPixel` probe cannot see
+this: it reads the *result*, and the result was always correct.
+
 **Linux CI** is the portability guard. It must stay green, and
 `toss <image>` there must be *defined* behaviour — exit 3,
 `not implemented yet: image viewing` — never a panic. Linux is not required to
