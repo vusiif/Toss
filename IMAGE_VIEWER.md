@@ -470,6 +470,23 @@ zoom path keeps its erase for a real reason (shrinking leaves pixels nobody
 covers), so the fix is per-path, not global. A `GetPixel` probe cannot see
 this: it reads the *result*, and the result was always correct.
 
+**M8's second report: the terminal sometimes covering the picture.** Also
+exactly what §8 predicts — a window that opens behind another one is a
+person's observation, not a probe's. The fix is to ask for the foreground
+explicitly after `ShowWindow`, which is also what puts the *focus* on the
+viewer: arrow keys go to whichever window has focus, so a viewer that lost
+both to its own terminal would be hidden **and** deaf.
+
+An honest note on the evidence. Two state checks were written for it — the
+viewer above its own console in Z-order, and the viewer holding the focus —
+and both pass with the fix in place. **They also pass with the fix removed:**
+on the machine that runs them, `SW_SHOW` alone already activates the new
+window in the cmd-launches-toss shape the probe can build. So they guard the
+*state* ("a viewer is never behind its terminal, and it holds focus") rather
+than proving this call is what provides it. The report came from the
+drop-an-image-on-the-exe path, which no probe in this repository can start;
+whether the call settles that path is a person's next look.
+
 **The console contract, checked with numbers** (three of the four checks run
 on their own, the fourth is a person):
 

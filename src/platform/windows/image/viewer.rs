@@ -22,9 +22,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
     AdjustWindowRectEx, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW,
     DispatchMessageW, GWLP_USERDATA, GetClientRect, GetMessageW, GetWindowLongPtrW, IDC_ARROW,
     LoadCursorW, MSG, PostQuitMessage, RegisterClassExW, SW_SHOW, SWP_NOMOVE, SWP_NOZORDER,
-    SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow, TranslateMessage,
-    WM_CAPTURECHANGED, WM_DESTROY, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
-    WM_MOUSEWHEEL, WM_NCDESTROY, WM_PAINT, WNDCLASS_STYLES, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
+    SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow,
+    TranslateMessage, WM_CAPTURECHANGED, WM_DESTROY, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCDESTROY, WM_PAINT, WNDCLASS_STYLES, WNDCLASSEXW,
+    WS_OVERLAPPEDWINDOW,
 };
 use windows::core::{HSTRING, PCWSTR, w};
 
@@ -152,10 +153,35 @@ pub fn run(request: &ViewRequest, image: Decoded) -> Result<(), TossError> {
     }
 
     // SAFETY: `window` was just handed to us by the successful create above,
-    // so it is live for exactly these calls. Both return a BOOL that reports
-    // prior state rather than success, so there is nothing to act on.
+    // Show it, then take the foreground — and the focus that comes with it.
+    //
+    // `SW_SHOW` activates, but "activated" describes this window's own state,
+    // not its place among every other top-level window on the screen. The
+    // console this process was given is one of those windows: it existed
+    // before this one did, and on the dropped-file path it is sitting exactly
+    // where the picture should be. A viewer *behind* a terminal is the bug a
+    // person reports and a `GetPixel` probe never sees (§8).
+    //
+    // The focus matters as much as the stacking. Arrow keys are delivered to
+    // whichever window has focus, so a viewer that lost the foreground to its
+    // own console would not only be hidden — it would be deaf, and the next
+    // press of a direction key would go to the terminal instead.
+    //
+    // Windows grants the foreground to the process the user just interacted
+    // with — dropping a file on it, pressing Enter at a prompt — and that is
+    // how Toss arrives on every supported path, so the request is one the
+    // system expects.
+    //
+    // SAFETY: `window` was handed over by the successful create above, so it
+    // is live for these calls. `ShowWindow`'s BOOL reports the previous
+    // visibility rather than success and `UpdateWindow`'s whether the window
+    // was visible — neither is an outcome to act on — and while
+    // `SetForegroundWindow` *does* answer whether the system granted the
+    // request, a refusal here leaves the window exactly where `ShowWindow`
+    // put it, which is the state this code was already written to accept.
     unsafe {
         let _ = ShowWindow(window, SW_SHOW);
+        let _ = SetForegroundWindow(window);
         let _ = UpdateWindow(window);
     }
 
