@@ -54,10 +54,20 @@ Rules:
 These apply to any future FFmpeg (or other media stack) build wiring:
 
 ```text
-GPL        allowed (must stay allowed)
-version3   allowed (must stay allowed)
+GPL        off by default; may be enabled only when a specific required
+           component needs it AND it passes the dependency gate (§1).
+           Toss being GPL-3.0-or-later does not by itself widen a
+           dependency's license surface.
+version3   follows the GPL components — off while they are off
 nonfree    FORBIDDEN — configure with --enable-nonfree fails the build
 ```
+
+The default for the HEVC-only closure is therefore **no `--enable-gpl`,
+no `--enable-version3`**: the spike built the exact needed capability as
+LGPL 2.1+ with both off (Master Context §7.4/§7.5), and a smaller license
+surface needs no justification. Turning GPL components on later is a
+dependency-gate decision tied to a real capability need, made then —
+not a side effect of Toss's own license.
 
 Recommended future enforcement (not yet implemented): a build-script
 check that greps the configure line / `config.h` for
@@ -73,7 +83,9 @@ HEVC-only minimal set stands until a real corpus need says otherwise:
 ```text
 --disable-everything ... --enable-demuxer=matroska --enable-demuxer=mov
 --enable-parser=hevc --enable-decoder=hevc --enable-protocol=file
---enable-gpl --enable-version3        (when the media stack lands)
+(+ libswscale when the presentation path needs BGRA conversion)
+--enable-gpl --enable-version3        NOT in the default build;
+                                      only via the gate above
 ```
 
 ---
@@ -121,7 +133,7 @@ platform floor (`Toss_AGENTS.md` §4).
 
 | Item | Status |
 |---|---|
-| FFmpeg / libav* | Spike-only so far (out-of-tree, `%TEMP%`). When admitted: **upstream licenses preserved**; combined build expected under `--enable-gpl --enable-version3`; `nonfree` forbidden; LGPL/GPL source obligations to be met at distribution time and re-checked in the pre-release audit. |
+| FFmpeg / libav* | Spike-only so far (out-of-tree, `%TEMP%`). When admitted: **upstream licenses preserved**; default build keeps GPL components **off** (the HEVC-only closure needs none — §2); `nonfree` forbidden; LGPL source obligations to be met at distribution time and re-checked in the pre-release audit. |
 | Exact version / configure line | to be recorded here at integration time |
 
 ---
