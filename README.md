@@ -74,11 +74,9 @@ an error: it reports the file's facts instead of refusing to help.
 
 ## License
 
-Licensed under either of
+Copyright (C) 2026 IceLolly
 
-- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or
-  http://www.apache.org/licenses/LICENSE-2.0)
-- MIT license ([LICENSE-MIT](LICENSE-MIT) or
-  http://opensource.org/licenses/MIT)
+Licensed under the GNU General Public License, version 3 or (at your
+option) any later version. See [LICENSE](LICENSE) for the full terms.
 
-at your option.
+SPDX-License-Identifier: GPL-3.0-or-later
