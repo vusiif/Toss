@@ -129,12 +129,16 @@ Windows SDK / Media Foundation / WIC / GDI are used as OS capabilities
 at runtime, not redistributed — no license artifact to track beyond the
 platform floor (`Toss_AGENTS.md` §4).
 
-### Reserved: media software decode stack (not yet in the tree)
+### Vendored FFmpeg (enters with the HEVC decode core)
 
-| Item | Status |
+| Item | Value |
 |---|---|
-| FFmpeg / libav* | Spike-only so far (out-of-tree, `%TEMP%`). When admitted: **upstream licenses preserved**; default build keeps GPL components **off** (the HEVC-only closure needs none — §2); `nonfree` forbidden; LGPL source obligations to be met at distribution time and re-checked in the pre-release audit. |
-| Exact version / configure line | to be recorded here at integration time |
+| Version | 9.0.2 (verbatim release tarball, `third_party/ffmpeg/`) |
+| Upstream | FFmpeg project — licenses preserved upstream, tree never edited |
+| License of the built closure | **LGPL-2.1-or-later** — GPL components off, nonfree off (§2) |
+| Configure line | lives in `build.rs` (`FFMPEG_OPTIONS`); capability = hevc decoder + matroska/mov demuxers + file protocol + swscale, from `--disable-everything` up |
+| Build mode | MSVC static (`--toolchain=msvc`), ASM on (NASM required), driven by `build.rs` into `.native-cache`, only on Windows with the `media` feature |
+| Distribution | LGPL source obligations apply at release time; re-checked in the pre-release audit (§1) |
 
 ---
 
