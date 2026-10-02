@@ -25,6 +25,9 @@
 #     tone.avi     MPEG-4 + MP3                   (video)
 #     tone.mov     H.264 + AAC                    (video)
 #     truncated.mp4  the mp4 cut inside its header (must not decode)
+#     hevc.mkv     HEVC Main10, 160x120, 10 frames (software decode core)
+#     hevc.mp4     the same in mp4 (the other demuxer the build keeps)
+#     hevc 中文.mkv  byte-identical to hevc.mkv — the path is the point (§22)
 #
 # `truncated.mp4` exists so error mapping has something real to fail on —
 # the lesson `image/truncated.png` taught in M7: a failure path with no
@@ -55,6 +58,17 @@ ffmpeg -y -v error -f lavfi -i "$picture" -f lavfi -i "$tone" \
     -c:v mpeg4 -c:a libmp3lame -shortest tone.avi
 ffmpeg -y -v error -f lavfi -i "$picture" -f lavfi -i "$tone" \
     -c:v libx264 -pix_fmt yuv420p -c:a aac -shortest tone.mov
+
+# Software HEVC fixtures (Slice 1 of the decode core): same picture, but
+# encoded by libx265 into Main10 10-bit (`yuv420p10le`) — the format that
+# is 365/366 of the real corpus and therefore the one swscale must convert.
+# Same ffmpeg build as the set above (N-126947), so the committed bytes
+# stay regenerable from this script alone.
+ffmpeg -y -v error -f lavfi -i "$picture" -c:v libx265 -pix_fmt yuv420p10le hevc.mkv
+ffmpeg -y -v error -f lavfi -i "$picture" -c:v libx265 -pix_fmt yuv420p10le hevc.mp4
+# Byte-identical copy under a Chinese name: the fixture for §22's path
+# rule. What has to hold is the *filename*, not different content.
+cp hevc.mkv "hevc 中文.mkv"
 
 # Cut inside the header, not at the tail: a file that merely stops early is
 # one some decoders half-accept, while a header that never finishes is

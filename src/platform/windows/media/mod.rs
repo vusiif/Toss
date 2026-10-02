@@ -8,6 +8,13 @@
 mod backend;
 mod player;
 
+// Slice 1 of the software decode core (docs/Phase76_Fallback_Boundary_
+// Design.md §5): FFmpeg lives behind this module and never comes out.
+// Its first *product* consumer is the fallback wiring (Slice 3), so until
+// then only this module's own tests call it — hence the allow.
+#[allow(dead_code)]
+mod libav;
+
 use std::path::Path;
 
 use windows::Win32::Media::MediaFoundation::{

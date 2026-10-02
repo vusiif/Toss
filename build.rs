@@ -1,16 +1,19 @@
-//! Builds the three vendored native libraries when the `archive` feature is on.
+//! Builds the vendored native libraries: zlib + liblzma + libarchive when
+//! the `archive` feature is on, FFmpeg when the `media` feature is on and
+//! the target is Windows (Slice 1 of the software HEVC decode core).
 //!
 //! Deliberately uses only `std::process` rather than a helper crate: the
 //! project chose to vendor its native code so that release builds never
 //! depend on network access or on whatever happens to be installed, and
 //! pulling a crates.io build-dependency back in would undo that (§25).
 //!
-//! Without the `archive` feature this script does nothing at all, so a
-//! default `cargo build` neither compiles them nor pays for them (§14).
+//! Without those features this script does nothing at all, so a default
+//! `cargo build` neither compiles them nor pays for them (§14).
 //!
 //! Order matters: libarchive's own configuration asks where zlib and liblzma
-//! are, so both must be built first.
+//! are, so both must be built first. FFmpeg is independent of all three.
 
+use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -73,62 +76,115 @@ const LIBARCHIVE_OPTIONS: &[&str] = &[
     "-DENABLE_LZMA=ON",
 ];
 
+/// Configure flags for the vendored FFmpeg — the whole of the software
+/// HEVC capability, stated once (Slice 1; spike-measured in
+/// TOSS_PROJECT_MASTER_CONTEXT §7.4–§7.6).
+///
+/// Deliberate omissions, each a ruling rather than an oversight:
+///
+/// - **no `--disable-asm`**: ASM is on (7.6-C ruling), so NASM is a hard
+///   build requirement — the spike measured ~2× decode from it.
+/// - **no `--enable-gpl` / `--enable-version3`**: GPL components stay off
+///   by default (`THIRD_PARTY_NOTICES.md` §2); this closure is LGPL as
+///   configured and needs nothing else.
+/// - **no `--enable-nonfree`**: forbidden outright (`THIRD_PARTY_NOTICES.md`
+///   §2) — and re-checked against `config.h` after every configure, below.
+/// - **no swscale disable**: swscale is *on* (default) because BGRA is the
+///   only pixel format Toss presents, and 365/366 of the corpus is 10-bit
+///   Main10 — the conversion is the capability, not an extra.
+const FFMPEG_OPTIONS: &[&str] = &[
+    "--toolchain=msvc",
+    "--disable-everything",
+    "--disable-programs",
+    "--disable-doc",
+    "--disable-debug",
+    "--disable-avdevice",
+    "--disable-avfilter",
+    "--disable-swresample",
+    "--disable-network",
+    "--enable-static",
+    "--disable-shared",
+    "--disable-zlib",
+    "--disable-bzlib",
+    "--disable-iconv",
+    "--disable-libxml2",
+    "--disable-xlib",
+    "--disable-sdl2",
+    "--enable-demuxer=matroska",
+    "--enable-demuxer=mov",
+    "--enable-parser=hevc",
+    "--enable-decoder=hevc",
+    "--enable-protocol=file",
+];
+
 fn main() {
     // Only these inputs may retrigger a rebuild. libarchive alone takes ~350s
     // to configure, so it must not rerun because an unrelated Rust file moved.
     println!("cargo:rerun-if-changed=third_party/libarchive");
     println!("cargo:rerun-if-changed=third_party/zlib");
     println!("cargo:rerun-if-changed=third_party/xz");
+    println!("cargo:rerun-if-changed=third_party/ffmpeg");
+    println!("cargo:rerun-if-changed=src/platform/windows/media/hevc_shim.c");
     println!("cargo:rerun-if-env-changed=CMAKE");
-
-    if env::var_os("CARGO_FEATURE_ARCHIVE").is_none() {
-        return;
-    }
 
     let manifest = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("cargo sets this"));
     let out = PathBuf::from(env::var_os("OUT_DIR").expect("cargo sets this"));
-    let cache = manifest
-        .join(NATIVE_CACHE)
-        .join(native_fingerprint(&manifest));
 
-    let (archive, zlib, lzma) = match restore(&out, &cache) {
-        Some(libraries) => libraries,
-        None => {
-            let cmake = find_cmake();
+    if env::var_os("CARGO_FEATURE_ARCHIVE").is_some() {
+        let cache = manifest
+            .join(NATIVE_CACHE)
+            .join(native_fingerprint(&manifest));
 
-            // zlib first, then liblzma: neither depends on the other, but
-            // libarchive depends on both, so both exist before its configure.
-            let zlib = build_zlib(&cmake, &manifest, &out);
-            let lzma = build_lzma(&cmake, &manifest, &out);
-            let archive = build_libarchive(&cmake, &manifest, &out, &zlib, &lzma);
+        let (archive, zlib, lzma) = match restore(&out, &cache) {
+            Some(libraries) => libraries,
+            None => {
+                let cmake = find_cmake();
 
-            store(&out, &cache, [&archive, &zlib, &lzma]);
-            (archive, zlib, lzma)
+                // zlib first, then liblzma: neither depends on the other, but
+                // libarchive depends on both, so both exist before its configure.
+                let zlib = build_zlib(&cmake, &manifest, &out);
+                let lzma = build_lzma(&cmake, &manifest, &out);
+                let archive = build_libarchive(&cmake, &manifest, &out, &zlib, &lzma);
+
+                store(&out, &cache, [&archive, &zlib, &lzma]);
+                (archive, zlib, lzma)
+            }
+        };
+
+        // Order is deliberate: archive references the codecs, so it comes first.
+        for library in [&archive, &zlib, &lzma] {
+            println!(
+                "cargo:rustc-link-search=native={}",
+                library
+                    .parent()
+                    .expect("a library file has a parent")
+                    .display()
+            );
         }
-    };
-
-    // Order is deliberate: archive references the codecs, so it comes first.
-    for library in [&archive, &zlib, &lzma] {
-        println!(
-            "cargo:rustc-link-search=native={}",
-            library
-                .parent()
-                .expect("a library file has a parent")
-                .display()
-        );
-    }
-    for library in [&archive, &zlib, &lzma] {
-        println!("cargo:rustc-link-lib=static={}", link_name(library));
-    }
-
-    if env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
-        // libarchive reaches for BCryptGenRandom on Windows even with CNG
-        // off in some configurations, and crypt32 covers the certificate and
-        // CAB paths. Naming them is free: msvc's linker only pulls what is
-        // actually referenced.
-        for system in ["bcrypt", "crypt32"] {
-            println!("cargo:rustc-link-lib={system}");
+        for library in [&archive, &zlib, &lzma] {
+            println!("cargo:rustc-link-lib=static={}", link_name(library));
         }
+
+        if env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+            // libarchive reaches for BCryptGenRandom on Windows even with CNG
+            // off in some configurations, and crypt32 covers the certificate and
+            // CAB paths. Naming them is free: msvc's linker only pulls what is
+            // actually referenced.
+            for system in ["bcrypt", "crypt32"] {
+                println!("cargo:rustc-link-lib={system}");
+            }
+        }
+    }
+
+    // Slice 1 — the software HEVC decode core (docs/Phase76_Fallback_
+    // Boundary_Design.md). The gates mirror `platform::windows::media`
+    // exactly — Windows target plus `media` feature — plus the msvc target,
+    // because that is the product's (§36). Linux and no-feature builds
+    // never hear of FFmpeg at all.
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
+        && env::var_os("CARGO_FEATURE_MEDIA").is_some()
+    {
+        build_ffmpeg(&manifest, &out);
     }
 }
 
@@ -747,4 +803,494 @@ fn run(command: &mut Command, stage: &str) {
     if !status.success() {
         panic!("vendored build step '{stage}' failed with {status}");
     }
+}
+
+// ---------------------------------------------------------------------------
+// FFmpeg — software HEVC decode (Slice 1)
+// ---------------------------------------------------------------------------
+
+/// Build the vendored FFmpeg (or reuse its cache) and emit its link lines.
+///
+/// The pipeline mirrors the spike that proved it (7.6-B): capture the MSVC
+/// environment once, let an MSYS2 shell run `configure` + `make`
+/// out-of-tree, compile Toss's one-file shim with `cl`, check the license
+/// invariants in `config.h`, then park the five libraries in
+/// `.native-cache`. A cache hit skips every process spawn — no vcvars, no
+/// MSYS2, no NASM — and rustc links straight from the cache directory.
+fn build_ffmpeg(manifest: &Path, out: &Path) {
+    if env::var("CARGO_CFG_TARGET_ENV").as_deref() != Ok("msvc") {
+        panic!(
+            "\n\nThe `media` feature's FFmpeg build supports only the msvc target\n\
+             (the product's target, §36). Build with --target x86_64-pc-windows-msvc.\n"
+        );
+    }
+
+    let fingerprint = ffmpeg_fingerprint(manifest);
+    let cache = manifest
+        .join(NATIVE_CACHE)
+        .join(format!("{fingerprint}-ffmpeg"));
+    let cached = [
+        "toss_shim.lib",
+        "avformat.lib",
+        "avcodec.lib",
+        "avutil.lib",
+        "swscale.lib",
+    ];
+
+    if ffmpeg_cache_usable(&cache, &cached) {
+        emit_ffmpeg_links(&cache);
+        return;
+    }
+
+    let vcvars = find_vcvarsall();
+    let env_map = vcvars_env(&vcvars);
+    let bash = find_bash();
+    let nasm_dir = find_nasm_dir().unwrap_or_else(|| {
+        panic!(
+            "\n\nNASM was not found, and the FFmpeg build keeps ASM on (7.6-C ruling).\n\
+             Install NASM and put it on PATH — for example:\n\n  \
+             winget install NASM.NASM\n\n\
+             or point TOSS_NASM at the directory holding nasm.exe.\n"
+        )
+    });
+
+    let build = out.join("ffmpeg-build");
+    fs::create_dir_all(&build).unwrap_or_else(|err| {
+        panic!("could not create {}: {err}", build.display());
+    });
+    let source = manifest.join("third_party").join("ffmpeg");
+    let jobs = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+
+    // PATH for the msys side: NASM's directory first (winget installs it
+    // outside PATH), then MSYS2's own usr/bin (make, sed, grep, sh — the
+    // shell the spike ran in), then ucrt64/bin if present, then whatever
+    // vcvars contributed (cl, lib, link, INCLUDE, LIB ride along too).
+    let mut path = nasm_dir.display().to_string();
+    if let Some(usr_bin) = bash.parent() {
+        path.push(';');
+        path.push_str(&usr_bin.display().to_string());
+        if let Some(msys_root) = usr_bin.parent().and_then(Path::parent) {
+            let ucrt = msys_root.join("ucrt64").join("bin");
+            if ucrt.is_dir() {
+                path.push(';');
+                path.push_str(&ucrt.display().to_string());
+            }
+        }
+    }
+    path.push(';');
+    path.push_str(env_map.get("PATH").map(String::as_str).unwrap_or(""));
+
+    // Out-of-tree configure: the source tree stays verbatim (UPSTREAM.md),
+    // everything generated lands in build/. `command -v make` first so a
+    // runner without MSYS2's make says so instead of dying mid-configure.
+    let script = format!(
+        "set -eu\n\
+         command -v make >/dev/null 2>&1 || \
+         {{ echo 'MSYS2 make not found — install it: pacman -S make' >&2; exit 127; }}\n\
+         cd '{build}'\n\
+         '{source}/configure' {options}\n\
+         make -j{jobs}\n",
+        build = windows_to_posix(&build),
+        source = windows_to_posix(&source),
+        options = FFMPEG_OPTIONS.join(" "),
+    );
+
+    let mut shell = Command::new(&bash);
+    shell.arg("-c").arg(&script);
+    shell.envs(&env_map);
+    shell.env("PATH", &path);
+    run(&mut shell, "FFmpeg configure + make");
+
+    // Build-time license invariant (THIRD_PARTY_NOTICES.md §2): GPL
+    // components off, nonfree forbidden. Checked against config.h — the
+    // artifact configure actually produced — rather than against the flags
+    // we *think* we passed.
+    assert_ffmpeg_license(&build.join("config.h"));
+
+    // The one Toss-owned C file, compiled against the freshly configured
+    // headers with the same MSVC environment the libraries just used.
+    let shim = manifest
+        .join("src")
+        .join("platform")
+        .join("windows")
+        .join("media")
+        .join("hevc_shim.c");
+    let obj = build.join("toss_shim.obj");
+    let shim_lib = build.join("toss_shim.lib");
+    let cl = find_tool_in_env(&env_map, "cl.exe").unwrap_or_else(|| {
+        panic!("vcvars did not put cl.exe on PATH: {}", vcvars.display());
+    });
+    let lib_tool = find_tool_in_env(&env_map, "lib.exe").unwrap_or_else(|| {
+        panic!("vcvars did not put lib.exe on PATH: {}", vcvars.display());
+    });
+
+    let mut compile = Command::new(&cl);
+    compile
+        // `/utf-8` matches the flag FFmpeg's own MSVC build passes to cl.
+        .args(["/nologo", "/O2", "/W3", "/utf-8", "/c"])
+        .arg(&shim)
+        .arg(format!("/Fo{}", obj.display()))
+        // Two roots: the vendored headers, plus the *generated* ones —
+        // `libavutil/avconfig.h` exists only in the configure output tree
+        // (out-of-tree build; the spike was in-tree and never needed this).
+        .arg(format!("/I{}", source.display()))
+        .arg(format!("/I{}", build.display()))
+        .envs(&env_map);
+    run(&mut compile, "FFmpeg shim compile");
+
+    let mut archive = Command::new(&lib_tool);
+    archive
+        .arg("/nologo")
+        .arg(format!("/OUT:{}", shim_lib.display()))
+        .arg(&obj)
+        .envs(&env_map);
+    run(&mut archive, "FFmpeg shim lib");
+
+    store_ffmpeg(
+        &cache,
+        [
+            build.join("libavformat").join("avformat.lib"),
+            build.join("libavcodec").join("avcodec.lib"),
+            build.join("libavutil").join("avutil.lib"),
+            build.join("libswscale").join("swscale.lib"),
+            shim_lib,
+        ],
+    );
+
+    emit_ffmpeg_links(&cache);
+}
+
+/// What the FFmpeg build would have been built from (mirrors
+/// `native_fingerprint`, with FFmpeg's own inputs and two extra tool
+/// identities: NASM decides whether asm objects exist at all).
+fn ffmpeg_fingerprint(manifest: &Path) -> String {
+    let mut state = Fnv::new();
+
+    state.feed(env::consts::OS.as_bytes());
+    for name in [
+        "CARGO_CFG_TARGET",
+        "CARGO_CFG_TARGET_ARCH",
+        "CARGO_CFG_TARGET_ENV",
+    ] {
+        state.feed(name.as_bytes());
+        state.feed(env::var(name).unwrap_or_default().as_bytes());
+    }
+
+    for option in FFMPEG_OPTIONS {
+        state.feed(option.as_bytes());
+    }
+
+    // The native-build logic itself: changing how this builds must not
+    // reuse artifacts built the old way.
+    if let Ok(source) = fs::read(manifest.join("build.rs")) {
+        state.feed(&source);
+    }
+    if let Ok(source) = fs::read(
+        manifest
+            .join("src")
+            .join("platform")
+            .join("windows")
+            .join("media")
+            .join("hevc_shim.c"),
+    ) {
+        state.feed(&source);
+    }
+
+    state.feed(tree_hash(&manifest.join("third_party").join("ffmpeg")).as_bytes());
+    state.feed(c_toolchain_fingerprint().as_bytes());
+    state.feed(nasm_fingerprint().as_bytes());
+
+    format!("{:016x}", state.finish())
+}
+
+/// Whether a complete, previously stored FFmpeg cache is present. Written
+/// manifest-last by `store_ffmpeg`, so a partial cache never restores —
+/// the same discipline `restore` relies on.
+fn ffmpeg_cache_usable(cache: &Path, names: &[&str]) -> bool {
+    cache.join("manifest.txt").is_file() && names.iter().all(|name| cache.join(name).is_file())
+}
+
+/// Park the five libraries in the cache. Unlike `store`, this fails hard:
+/// the link lines point at the cache, so a cache that could not be written
+/// must stop the build with a real message rather than surface as a
+/// mysterious rustc error later.
+fn store_ffmpeg(cache: &Path, libraries: [PathBuf; 5]) {
+    let _ = fs::remove_dir_all(cache);
+    fs::create_dir_all(cache)
+        .unwrap_or_else(|err| panic!("could not create {}: {err}", cache.display()));
+
+    let mut manifest = String::new();
+    for library in &libraries {
+        let name = library
+            .file_name()
+            .expect("a library file has a name")
+            .to_string_lossy()
+            .into_owned();
+        fs::copy(library, cache.join(&name)).unwrap_or_else(|err| {
+            panic!("could not cache {}: {err}", library.display());
+        });
+        manifest.push_str(&name);
+        manifest.push('\n');
+    }
+
+    fs::write(cache.join("manifest.txt"), manifest)
+        .unwrap_or_else(|err| panic!("could not write cache manifest: {err}"));
+}
+
+/// Emit the link lines for a usable FFmpeg cache.
+///
+/// Library order is deliberate: every dependency appears *after* the
+/// dependant that needs it (shim → avformat → swscale → avcodec → avutil),
+/// which is the order both spike linkers accepted.
+fn emit_ffmpeg_links(cache: &Path) {
+    println!("cargo:rustc-link-search=native={}", cache.display());
+    for library in ["toss_shim", "avformat", "swscale", "avcodec", "avutil"] {
+        println!("cargo:rustc-link-lib=static={library}");
+    }
+    // From FFmpeg's own EXTRALIBS for this configuration: avcodec wants
+    // ole32 and user32, avutil wants user32 and bcrypt. Naming them is
+    // free — the linker pulls only what is referenced (same reasoning as
+    // the archive block above).
+    for system in ["ole32", "user32", "bcrypt"] {
+        println!("cargo:rustc-link-lib={system}");
+    }
+}
+
+/// The license invariant, read from configure's own output
+/// (`THIRD_PARTY_NOTICES.md` §2): GPL components off, nonfree forbidden.
+fn assert_ffmpeg_license(config_h: &Path) {
+    let text = fs::read_to_string(config_h).unwrap_or_else(|err| {
+        panic!(
+            "FFmpeg configured but {} is unreadable: {err}",
+            config_h.display()
+        );
+    });
+
+    let gpl_on = text.contains("#define CONFIG_GPL 1");
+    let nonfree_on = text.contains("#define CONFIG_NONFREE 1");
+    let both_declared =
+        text.contains("#define CONFIG_GPL 0") && text.contains("#define CONFIG_NONFREE 0");
+
+    if gpl_on || nonfree_on || !both_declared {
+        panic!(
+            "\n\nFFmpeg's build-time license invariant failed — see\n\
+             THIRD_PARTY_NOTICES.md §2:\n\n  \
+             GPL components: {}  (must be off)\n  \
+             nonfree:        {}  (forbidden)\n\n\
+             config.h: {}\n",
+            if gpl_on { "ENABLED" } else { "off" },
+            if nonfree_on { "ENABLED" } else { "off" },
+            config_h.display(),
+        );
+    }
+}
+
+/// `vcvarsall.bat`'s install root, via vswhere first (any edition, any
+/// year) and a bounded walk as fallback for machines without the installer.
+fn find_vcvarsall() -> PathBuf {
+    const VSWHERE: &str = r"C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe";
+
+    if Path::new(VSWHERE).is_file() {
+        if let Some(output) = Command::new(VSWHERE)
+            .args([
+                "-latest",
+                "-products",
+                "*",
+                "-requires",
+                "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+                "-property",
+                "installationPath",
+            ])
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+        {
+            let install = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+            if !install.is_empty() {
+                let candidate = Path::new(&install)
+                    .join("VC")
+                    .join("Auxiliary")
+                    .join("Build")
+                    .join("vcvarsall.bat");
+                if candidate.is_file() {
+                    return candidate;
+                }
+            }
+        }
+    }
+
+    for root in [
+        r"C:\Program Files\Microsoft Visual Studio",
+        r"C:\Program Files (x86)\Microsoft Visual Studio",
+        r"C:\BuildTools",
+    ] {
+        let Ok(editions) = fs::read_dir(root) else {
+            continue;
+        };
+        for edition in editions.flatten() {
+            let Ok(years) = fs::read_dir(edition.path()) else {
+                continue;
+            };
+            for year in years.flatten() {
+                let candidate = year
+                    .path()
+                    .join("VC")
+                    .join("Auxiliary")
+                    .join("Build")
+                    .join("vcvarsall.bat");
+                if candidate.is_file() {
+                    return candidate;
+                }
+            }
+        }
+    }
+
+    panic!(
+        "\n\nvcvarsall.bat was not found, and the FFmpeg build compiles with\n\
+         MSVC (the product's toolchain, §36). Install Visual Studio Build\n\
+         Tools with the C++ workload, or run from a Developer prompt.\n"
+    );
+}
+
+/// Run `vcvarsall x64` and capture the environment it produces.
+///
+/// Deliberately *no hand-written quotes*: vcvarsall is passed as its own
+/// argument, so the only quotes on the command line are the automatic ones
+/// around a path containing spaces — cmd handles those cleanly. Building
+/// `call "..." x64 && set` as one string is the classic cmd quoting trap:
+/// Rust escapes the nested quotes with backslashes that cmd does not
+/// understand, the path mangles, and vcvarsall dies with exit 1. vcvars'
+/// banner lines are not `KEY=VALUE` and simply fall out of the parser.
+fn vcvars_env(vcvars: &Path) -> HashMap<String, String> {
+    let output = Command::new("cmd")
+        .arg("/c")
+        .arg(vcvars)
+        .arg("x64")
+        .arg("&&")
+        .arg("set")
+        .output()
+        .unwrap_or_else(|err| panic!("failed to launch cmd for vcvars: {err}"));
+
+    if !output.status.success() {
+        panic!(
+            "vcvarsall failed with {} while preparing the FFmpeg build",
+            output.status
+        );
+    }
+
+    let mut map = HashMap::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        if let Some((key, value)) = line.split_once('=') {
+            if !key.is_empty() && !key.contains(['[', ']', ' ']) {
+                // Windows environment names are case-insensitive and cmd
+                // prints `Path`, not `PATH`: normalising the key here is
+                // what keeps every lookup below one spelling.
+                map.insert(key.to_ascii_uppercase(), value.to_owned());
+            }
+        }
+    }
+    if !map.contains_key("PATH") {
+        panic!("vcvars produced no PATH — cannot place cl.exe or the msys tools");
+    }
+    map
+}
+
+/// Find an executable inside a captured environment's PATH. Resolved here
+/// rather than left to `Command::new(name)` so the child never depends on
+/// which PATH CreateProcess happens to consult.
+fn find_tool_in_env(env_map: &HashMap<String, String>, name: &str) -> Option<PathBuf> {
+    let path = env_map.get("PATH")?;
+    for dir in env::split_paths(path) {
+        let candidate = dir.join(name);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// MSYS2's bash, by explicit location. A PATH scan is deliberately absent:
+/// `C:\Windows\System32\bash.exe` is *WSL*, and running an msys build
+/// script under it fails in ways that look like configure bugs.
+fn find_bash() -> PathBuf {
+    if let Some(path) = env::var_os("TOSS_BASH") {
+        return PathBuf::from(path);
+    }
+
+    let candidate = PathBuf::from(r"C:\msys64\usr\bin\bash.exe");
+    if candidate.is_file() {
+        return candidate;
+    }
+
+    panic!(
+        "\n\nMSYS2's bash was not found at {}, and FFmpeg's configure is a\n\
+         POSIX shell script (7.6-C measured this: VS Build Tools alone is\n\
+         not enough — sh and GNU make are hard requirements). Install MSYS2\n\
+         there, or set TOSS_BASH to your bash.exe. WSL's bash will not do.\n",
+        candidate.display()
+    );
+}
+
+/// The directory holding `nasm.exe`: PATH first, then the two places the
+/// known installers put it. `None` means "not installed" — the caller
+/// decides whether that is fatal (it is, while ASM stays on).
+fn find_nasm_dir() -> Option<PathBuf> {
+    if let Some(path) = env::var_os("TOSS_NASM") {
+        let dir = PathBuf::from(path);
+        if dir.join("nasm.exe").is_file() {
+            return Some(dir);
+        }
+    }
+
+    if let Some(path) = env::var_os("PATH") {
+        for dir in env::split_paths(&path) {
+            if dir.join("nasm.exe").is_file() {
+                return Some(dir);
+            }
+        }
+    }
+
+    let local = env::var_os("LOCALAPPDATA")
+        .map(|dir| PathBuf::from(dir).join("bin").join("NASM"))
+        .unwrap_or_default();
+    [local, PathBuf::from(r"C:\Program Files\NASM")]
+        .into_iter()
+        .find(|dir| dir.join("nasm.exe").is_file())
+}
+
+/// NASM's identity for the fingerprint — asm on with NASM X and asm on
+/// with NASM Y are not the same build. `nasm:none` covers the fingerprint
+/// computed on a machine that cannot build (the build step reports that
+/// properly, with an install hint).
+fn nasm_fingerprint() -> String {
+    let Some(dir) = find_nasm_dir() else {
+        return "nasm:none".to_owned();
+    };
+
+    Command::new(dir.join("nasm.exe"))
+        .arg("-v")
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+        .unwrap_or_else(|| "nasm:unknown".to_owned())
+}
+
+/// A Windows path as an msys shell wants it: `C:\x\y` → `/c/x/y`.
+/// Already-POSIX paths pass through unchanged.
+fn windows_to_posix(path: &Path) -> String {
+    let text = path.to_string_lossy().replace('\\', "/");
+    if let Some((drive, rest)) = text.split_once(':') {
+        if drive.len() == 1
+            && drive
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic())
+        {
+            return format!("/{}{}", drive.to_lowercase(), rest);
+        }
+    }
+    text
 }

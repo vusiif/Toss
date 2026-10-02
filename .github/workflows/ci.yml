@@ -55,6 +55,26 @@ jobs:
       # too — no separate key, no extra directory to reason about.
       - uses: Swatinem/rust-cache@v2
 
+      # The `media` feature's FFmpeg build (Slice 1) needs three tools the
+      # Rust toolchain does not provide: MSYS2's bash+make for configure
+      # (the image ships MSYS2 at C:\msys64 but not necessarily make),
+      # NASM for the asm that the A/B measured at ~2x, and vcvars via
+      # vswhere (already present with the VS install). Linux never runs
+      # this — build.rs gates on target_os=windows + the feature.
+      - name: Provision FFmpeg build tools
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (-not (Test-Path 'C:\msys64\usr\bin\make.exe')) {
+            & 'C:\msys64\usr\bin\pacman.exe' -S --noconfirm --needed make
+          }
+          if (-not (Get-Command nasm -ErrorAction SilentlyContinue)) {
+            choco install nasm -y --no-progress
+          }
+          if (Test-Path 'C:\Program Files\NASM') {
+            Add-Content -Path $env:GITHUB_PATH -Value 'C:\Program Files\NASM'
+          }
+
       - name: Formatting
         shell: bash
         run: cargo fmt --check
