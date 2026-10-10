@@ -1,0 +1,4 @@
+# The product must run on a machine without the Visual C++ Redistributable.
+# Windows system APIs remain dynamic; the C runtime is part of the EXE.
+[target.'cfg(all(target_os = "windows", target_env = "msvc"))']
+rustflags = ["-C", "target-feature=+crt-static"]

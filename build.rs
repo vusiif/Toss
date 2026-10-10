@@ -201,6 +201,9 @@ fn native_fingerprint(manifest: &Path) -> String {
     let mut state = Fnv::new();
 
     state.feed(env::consts::OS.as_bytes());
+    // /MT and /MD libraries must never share a cache: Rust's CRT choice
+    // controls the CMake runtime below, even when sources are identical.
+    state.feed(msvc_runtime().as_bytes());
     for name in [
         "CARGO_CFG_TARGET",
         "CARGO_CFG_TARGET_ARCH",
@@ -672,6 +675,20 @@ fn build_libarchive(cmake: &str, manifest: &Path, out: &Path, zlib: &Path, lzma:
 fn configure(cmake: &str, source: &Path, build: &Path, options: &[&str]) {
     let mut command = Command::new(cmake);
     command.arg("-S").arg(source).arg("-B").arg(build);
+    if env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+        command.arg("-DCMAKE_POLICY_DEFAULT_CMP0091=NEW");
+        command.arg(format!("-DCMAKE_MSVC_RUNTIME_LIBRARY={}", msvc_runtime()));
+        // libarchive also has an older runtime-selection helper; keep its
+        // switch consistent with CMake's runtime property, without editing
+        // the vendored source or imposing that option on other projects.
+        if source.file_name().is_some_and(|name| name == "libarchive") {
+            command.arg(if msvc_runtime() == "MultiThreaded" {
+                "-DMSVC_USE_STATIC_CRT=ON"
+            } else {
+                "-DMSVC_USE_STATIC_CRT=OFF"
+            });
+        }
+    }
     // CMake reads a bare backslash as an escape, so every path we hand it is
     // rewritten to forward slashes. On POSIX this is a no-op.
     for option in options {
@@ -679,6 +696,21 @@ fn configure(cmake: &str, source: &Path, build: &Path, options: &[&str]) {
     }
 
     run(&mut command, "configure");
+}
+
+/// Native libraries are always built in Release, including for Rust tests.
+/// Match Cargo's selected CRT so a static Rust EXE never imports a dynamic
+/// C heap through libarchive, zlib or liblzma.
+fn msvc_runtime() -> &'static str {
+    if env::var("CARGO_CFG_TARGET_FEATURE")
+        .unwrap_or_default()
+        .split(',')
+        .any(|feature| feature == "crt-static")
+    {
+        "MultiThreaded"
+    } else {
+        "MultiThreadedDLL"
+    }
 }
 
 fn target(cmake: &str, build: &Path, name: &str) {

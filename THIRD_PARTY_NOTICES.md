@@ -129,6 +129,20 @@ Windows SDK / Media Foundation / WIC / GDI are used as OS capabilities
 at runtime, not redistributed — no license artifact to track beyond the
 platform floor (`Toss_AGENTS.md` §4).
 
+### Microsoft C runtime (Windows MSVC)
+
+Windows MSVC builds select a static C runtime in `.cargo/config.toml`.
+`build.rs` gives the CMake libraries the same runtime choice and includes
+that choice in their cache key. This removes the executable's dependency
+on an independently installed Visual C++ Redistributable; Windows system
+APIs remain dynamic. The C runtime was already a dependency of previous
+builds; its linking and distribution mode has changed.
+
+The pre-release audit must include the applicable Visual Studio/SDK runtime
+redistribution terms for the actual toolchain used. The import-table check
+proves the absence of a runtime DLL dependency, not license compliance or
+successful execution on a clean Windows installation.
+
 ### Vendored FFmpeg (enters with the HEVC decode core)
 
 | Item | Value |
