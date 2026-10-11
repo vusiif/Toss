@@ -5,8 +5,13 @@ is the inventory of third-party components Toss links or vendors, the
 license policy for everything admitted in the future, and the build-level
 license invariants that are not allowed to regress.
 
-This is a project policy document, not legal advice. A dependency
-license audit is still required before the first public release.
+This is a project policy document, not legal advice. A bounded
+engineering license/source audit of the actual static release closure was
+performed 2026-10-11: findings, clause-level evidence, the remaining
+owner decisions and the pack-time checklist live in
+`docs/LICENSE_AUDIT_REPORT.md` (local) and §5 below. It does not
+constitute a legal-compliance verdict; the sign-off decisions it lists
+remain open with the project owner.
 
 ---
 
@@ -69,12 +74,16 @@ surface needs no justification. Turning GPL components on later is a
 dependency-gate decision tied to a real capability need, made then —
 not a side effect of Toss's own license.
 
-Recommended future enforcement (not yet implemented): a build-script
-check that greps the configure line / `config.h` for
-`CONFIG_NONFREE 1` and fails hard if found. `--enable-nonfree` produces
-binaries that are not redistributable at all (FFmpeg LICENSE.md), which
-is categorically incompatible with Toss shipping as one downloadable
-`toss.exe`.
+Enforcement is implemented and runs on every build that compiles the
+FFmpeg closure: after configure, `build.rs` (`assert_ffmpeg_license`)
+reads the produced `config.h` — the artifact configure actually wrote,
+not the flags we think we passed — and fails the build if `CONFIG_GPL 1`
+or `CONFIG_NONFREE 1` is present, or if either is not declared `0`. The
+`FFMPEG_CONFIGURATION` line recorded in that same `config.h` additionally
+shows the exact configure invocation for audit. `--enable-nonfree`
+produces binaries that are not redistributable at all (FFmpeg
+LICENSE.md), which is categorically incompatible with Toss shipping as
+one downloadable `toss.exe`.
 
 Capability admission is **unaffected** by the license change: GPL
 permission is not an invitation to widen the component set. The
@@ -105,7 +114,7 @@ HEVC-only minimal set stands until a real corpus need says otherwise:
 | Crate | License | Role | GPL-3.0-or-later compatible |
 |---|---|---|---|
 | `windows` (+ its `windows-*` transitive crates) | MIT OR Apache-2.0 | Win32 bindings, behind the `image`/`media` features | YES |
-| `proc-macro2`, `quote`, `syn`, `unicode-ident` | MIT OR Apache-2.0 | build-time only (`windows` crate codegen) | YES |
+| `proc-macro2`, `quote`, `syn`, `unicode-ident` | MIT OR Apache-2.0 (`unicode-ident` **also** carries the Unicode License v3 for its derived identifier data) | build-time only (`windows` crate codegen) | YES |
 
 No other runtime crates exist. The dependency closure is deliberately
 15 crates (`ARCHIVE_BACKEND.md` §55).
@@ -116,9 +125,15 @@ Provenance and tarball hashes: `third_party/UPSTREAM.md`.
 
 | Library | Version | Upstream license | Role | Compatible |
 |---|---|---|---|---|
-| libarchive | 3.8.9 | BSD-3-Clause | archive read/write behind `ArchiveBackend` | YES |
+| libarchive | 3.8.9 | **BSD-2-Clause-form primary notice** (2 conditions: retain / reproduce in docs) with per-file exceptions documented in its `COPYING` (3-clause UC Regents for two files, public domain for one, CC0/OpenSSL/Apache-2.0 for the BLAKE2 files) | archive read/write behind `ArchiveBackend` | YES |
 | zlib | 1.3.1 | zlib license (permissive) | Deflate for ZIP entries | YES |
 | xz / liblzma | 5.6.4 | 0BSD (liblzma only; the xz *tools* are GPL and are not built) | LZMA/LZMA2 for 7z entries | YES |
+
+> Correction 2026-10-11 (bounded audit): the libarchive label used to
+> read "BSD-3-Clause"; the tree's own `third_party/libarchive/COPYING`
+> carries the two-condition form as its primary notice, so the table now
+> says what the file says. The same one-line label correction was applied
+> to `third_party/UPSTREAM.md`.
 
 All three are permissive; static linking them under a GPL-3.0-or-later
 whole carries no additional restriction.
@@ -138,10 +153,26 @@ on an independently installed Visual C++ Redistributable; Windows system
 APIs remain dynamic. The C runtime was already a dependency of previous
 builds; its linking and distribution mode has changed.
 
-The pre-release audit must include the applicable Visual Studio/SDK runtime
-redistribution terms for the actual toolchain used. The import-table check
-proves the absence of a runtime DLL dependency, not license compliance or
-successful execution on a clean Windows installation.
+The pre-release audit read the exact 2026 Microsoft terms for the actual
+toolchain (`docs/LICENSE_AUDIT_REPORT.md` §4; texts saved in
+`docs/release-candidate/license-docs/`). Facts it established, stated
+without overclaiming:
+
+- No Microsoft redistributable *file* ships — `dumpbin /DEPENDENTS` shows
+  only Windows system DLLs; the import-table check proves the absence of
+  a runtime DLL dependency, not license compliance or successful
+  execution on a clean Windows installation.
+- The static CRT object code **is embedded** in `toss.exe`. The exact
+  2026 "Distributable Code" grant is affirmative and scoped to "code
+  listed on the Distributable List" (VC Runtime merge modules and
+  `VC\redist` files); the static `.lib` is not on that list, and the
+  build-tool use grant authorizes building, not distribution.
+- A **scoped, unsettled authorization question remains** (M1 in the
+  audit): whether the exact terms affirmatively authorize conveying a
+  binary containing the *unlisted* static CRT object code. The read
+  clauses neither expressly grant nor forbid it. This is not a finding of
+  infringement, and the proprietary CRT is **not** claimed to be GPL or
+  relicensed by Toss.
 
 ### Vendored FFmpeg (enters with the HEVC decode core)
 
@@ -160,6 +191,50 @@ successful execution on a clean Windows installation.
 
 - Not a copy of every upstream license text — upstream trees carry
   their own (`third_party/libarchive/COPYING`, `third_party/zlib/README`,
-  `third_party/xz/COPYING`, `LICENSE` for GPLv3).
-- Not a substitute for the pre-release license audit required before
-  v0.1 (see §1).
+  `third_party/xz/COPYING`, `third_party/ffmpeg/COPYING.LGPLv2.1`,
+  `LICENSE` for GPLv3), and the crate texts are staged under
+  `docs/release-licenses/` for packing.
+- Not the audit itself, and not a legal verdict — the bounded engineering
+  audit (clause-level evidence and the open decisions) is
+  `docs/LICENSE_AUDIT_REPORT.md`; the notices file intended to ship with
+  the exe is `docs/RELEASE_NOTICES_DRAFT.md`.
+
+---
+
+## 5. Release license/source checklist (from the 2026-10-11 audit)
+
+Run against the actual release artifact before publishing. Evidence and
+wording for each item: `docs/LICENSE_AUDIT_REPORT.md` §6–§7.
+
+1. **Decide the source-conveyance route** for GPL-3 §6 / LGPL-2.1 §6 —
+   **decided for the reviewable candidate: source published alongside the
+   exe** (LGPL §6(a)+(d), GPL §6); draft packaging decision recorded in
+   `docs/release-candidate/PACKAGE.md`. Not used: written offer. Nothing
+   published yet; hosting happens only at the publishing step.
+2. **Confirm the exact toolchain's Distributable Code clauses** — **read
+   2026-10-11** (second pass): the exact VS2026 BuildTools MSLT, VC++ V14
+   runtime terms, the product MSLT Distributable-Code section and the
+   exact 2026 Distributable List page were read (texts saved under
+   `docs/release-candidate/license-docs/`); toolchain verified stable
+   (not preview); zero Distributable-List files ship, but the static CRT
+   object code is embedded. Two scoped residuals are itemized in
+   `docs/LICENSE_AUDIT_REPORT.md`: **R1** (§4.3 — whether the static CRT
+   qualifies as a GPL-3 §1 System Library; the carve-out text itself
+   exists) and **M1** (§4.2 — distribution authorization of the embedded
+   CRT). No absolute verdict is claimed.
+3. **Ship with the exe**: `LICENSE`, this file, the notices file built
+   from `docs/RELEASE_NOTICES_DRAFT.md`, and
+   `third_party/ffmpeg/COPYING.LGPLv2.1`.
+4. **Include the staged crate texts** from `docs/release-licenses/`
+   (windows-rs + proc-macro2 family MIT/Apache-2.0, unicode-ident
+   Unicode License v3).
+5. **Notices must reproduce** the libarchive `COPYING` block, the zlib
+   README notice, and `xz/COPYING.0BSD` (draft has all three).
+6. **State prominently** that FFmpeg is used, LGPL-2.1-or-later, built
+   with GPL/nonfree off (`config.h` invariants), and where its source
+   lives.
+7. **Tie source to the binary**: record the release tag/commit next to
+   the exe's SHA-256 (`docs/logs/release-candidate.sha256`).
+8. **Re-run** the license invariant (automatic in `build.rs`), the
+   `avcodec.lib` symbol grep for GPL/IJG-sensitive objects, and items 3–5
+   if any build input changed.

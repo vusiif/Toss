@@ -9,7 +9,7 @@ belong in an adapter or upstream.
 
 | Library | Version | License | Role |
 |---|---|---|---|
-| [libarchive](https://www.libarchive.org/) | **3.8.9** | BSD-3-Clause | archive reader and writer behind `ArchiveBackend` |
+| [libarchive](https://www.libarchive.org/) | **3.8.9** | BSD-2-Clause-form primary notice (per-file exceptions listed in its COPYING) | archive reader and writer behind `ArchiveBackend` |
 | [zlib](https://zlib.net/) | **1.3.1** | zlib license (permissive) | Deflate, so ZIP entries can be read |
 | [xz / liblzma](https://tukaani.org/xz/) | **5.6.4** | **0BSD** for liblzma | LZMA / LZMA2, so 7z entries can be read and written |
 | [FFmpeg](https://ffmpeg.org/) | **9.0.2** | **LGPL-2.1-or-later** (GPL components *not* enabled, see below) | software HEVC decode + BGRA conversion behind the `media` feature |
