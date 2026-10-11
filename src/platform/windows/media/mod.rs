@@ -7,12 +7,16 @@
 
 mod backend;
 mod player;
+// Slice 2's presentation path, and Slice 3's terminal fallback (design
+// docs/Phase76_Fallback_Boundary_Design.md §2, §7, §8). It owns the
+// software window and the pacing loop; `backend::play` reaches it only
+// after Media Foundation has refused the file as a capability gap.
+mod software;
 
 // Slice 1 of the software decode core (docs/Phase76_Fallback_Boundary_
-// Design.md §5): FFmpeg lives behind this module and never comes out.
-// Its first *product* consumer is the fallback wiring (Slice 3), so until
-// then only this module's own tests call it — hence the allow.
-#[allow(dead_code)]
+// Design.md §5): FFmpeg lives behind this module and never comes out. Its
+// product consumer is `software` (the presentation window) and, through it,
+// the fallback wiring in `backend`.
 mod libav;
 
 use std::path::Path;

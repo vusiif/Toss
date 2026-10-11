@@ -41,17 +41,26 @@ use crate::core::error::TossError;
 pub(super) fn play(path: &Path) -> Result<(), TossError> {
     let _foundation = MediaFoundation::new(path)?;
 
-    // Open before the session exists: a file that cannot be opened should
-    // cost no session at all (§5's "the safest useful default" applies to
-    // failures too — spend the least, report the most).
-    let source = open_source(path)?;
-
-    let (descriptor, planned, duration) = probe(path, &source)?;
+    // Open and probe. A capability refusal from either — "this machine has
+    // no handler for those bytes" — is the *only* failure that earns the
+    // bundled decoder's second opinion; a missing file, a permission wall, a
+    // damaged file and a systemic failure are terminal verdicts and must not
+    // be masked by trying again (design §3 decision table).
+    let source = match open_source(path) {
+        Ok(source) => source,
+        Err(err) => return software_after(path, err, super::software::play),
+    };
+    let (descriptor, planned, duration) = match probe(path, &source) {
+        Ok(probed) => probed,
+        Err(err) => return software_after(path, err, super::software::play),
+    };
     let duration = duration.min(i64::MAX as u64) as i64;
 
-    if !planned.iter().any(|stream| stream.video) {
+    if !carries_video(&planned) {
         // Audio only: one stream, one topology, the blocking pump P7-A
-        // proved — no window (D2), and nothing to degrade *to* either.
+        // proved — no window (D2). Software v1 decodes no audio, so there is
+        // nothing to fall back to and this path stays terminal (design
+        // §3 table row 7).
         let session = Session::new(path)?;
         let built = topology(path, &source, &descriptor, &planned, None)?;
         start(&session, path, &built)?;
@@ -63,11 +72,9 @@ pub(super) fn play(path: &Path) -> Result<(), TossError> {
     // Video, with the lesson of a real file: 10.8 GB of H.264 carrying a
     // DTS-HD MA track. Windows ships no DTS decoder, so the full topology
     // failed with MF_E_TOPO_CODEC_NOT_FOUND — condemning a picture that was
-    // perfectly playable. The rule is the project's own: give the input the
-    // safest useful answer. Every stream first; if the machine cannot
-    // decode one of them, drop to the video alone and play what is there.
-    // Only when *that* fails does anything get reported, and it reports as
-    // §24's 3 — no decoder here, not a damaged file.
+    // perfectly playable. Every stream first; if the machine cannot decode
+    // one of them, drop to the video alone and play what is there. Only when
+    // *that* fails does the bundled software decoder get its turn.
     let video_only: Vec<PlannedStream> = planned.iter().filter(|s| s.video).cloned().collect();
     let attempts: [&[PlannedStream]; 2] = [&planned, &video_only];
     let mut last: Option<TossError> = None;
@@ -83,22 +90,26 @@ pub(super) fn play(path: &Path) -> Result<(), TossError> {
         let session = Session::new(path)?;
 
         // A window per attempt: the previous attempt's window died with
-        // its `run`, and a destroyed handle cannot host a message loop —
-        // which is how the first version of this loop hung for ever
-        // waiting for a quit nobody left behind.
+        // its `run`, and a destroyed handle cannot host a message loop.
         let window = super::player::Window::new(path)?;
 
         let built = match topology(path, &source, &descriptor, subset, Some(window.handle())) {
             Ok(built) => built,
             Err(err) => {
-                last = Some(err);
-                continue;
+                if is_capability_refusal(&err) {
+                    last = Some(err);
+                    continue;
+                }
+                return Err(err);
             }
         };
 
         if let Err(err) = start(&session, path, &built) {
-            last = Some(err);
-            continue;
+            if is_capability_refusal(&err) {
+                last = Some(err);
+                continue;
+            }
+            return Err(err);
         }
 
         match super::player::run(&window, session.inner.clone(), path, duration) {
@@ -106,25 +117,77 @@ pub(super) fn play(path: &Path) -> Result<(), TossError> {
                 session.close(path)?;
                 return Ok(());
             }
-            // Only "this machine cannot play that" earns the second attempt
-            // — that is exactly what `from_hresult` files as
-            // `UnsupportedFormat`. Anything else is the real verdict and is
-            // handed straight back.
             Err(err) => {
-                let degrade =
-                    matches!(err, TossError::UnsupportedFormat(_)) && attempt + 1 < attempts.len();
-                if degrade {
-                    last = Some(err);
+                // Only "this machine cannot play that" degrades — either to
+                // the video-only retry or, once that is spent too, to the
+                // software decoder. Anything else is the real verdict.
+                if !is_capability_refusal(&err) {
+                    return Err(err);
+                }
+                last = Some(err);
+                if attempt + 1 < attempts.len() {
                     continue;
                 }
-                return Err(err);
+                break;
             }
         }
     }
 
-    Err(last.unwrap_or_else(|| {
-        TossError::other("no stream of this file could be prepared for playback")
-    }))
+    // Media Foundation's two attempts are spent. The chain's third link is
+    // the bundled decoder — reached only for a capability refusal, never as
+    // a catch-all (design §2).
+    after_attempts(path, last, super::software::play)
+}
+
+/// Whether a failure is the one thing that may degrade: a *capability*
+/// refusal (`TossError::UnsupportedFormat`), never a damaged file, a missing
+/// file, a permission wall or a systemic error. One predicate, so the retry
+/// rule cannot drift between the three places that apply it. Note that
+/// `NotImplemented` also maps to exit 3 but is *not* a capability refusal —
+/// the rule is written on the typed variant, never on the exit number.
+fn is_capability_refusal(err: &TossError) -> bool {
+    matches!(err, TossError::UnsupportedFormat(_))
+}
+
+/// Whether the probe saw a video stream. Audio-only and stream-less files
+/// have no software second opinion (v1 decodes no audio — design §3 row 7).
+fn carries_video(planned: &[PlannedStream]) -> bool {
+    planned.iter().any(|stream| stream.video)
+}
+
+/// The software decoder's second opinion on a failure from `open_source` or
+/// `probe`. Only a capability refusal reaches `runner`; everything else keeps
+/// its own terminal verdict unchanged.
+///
+/// `runner` is the seam the routing tests inject a recorder into. Production
+/// always passes `super::software::play`; there is no CLI flag or environment
+/// variable and no second backend registry — the seam exists so the decision
+/// is observable without Media Foundation, and it runs the same path the
+/// binary does.
+fn software_after<R>(path: &Path, err: TossError, runner: R) -> Result<(), TossError>
+where
+    R: FnOnce(&Path) -> Result<(), TossError>,
+{
+    if is_capability_refusal(&err) {
+        runner(path)
+    } else {
+        Err(err)
+    }
+}
+
+/// What to do once Media Foundation's attempts are spent: a capability
+/// refusal runs the bundled decoder, anything else keeps its verdict.
+fn after_attempts<R>(path: &Path, last: Option<TossError>, runner: R) -> Result<(), TossError>
+where
+    R: FnOnce(&Path) -> Result<(), TossError>,
+{
+    match last {
+        Some(TossError::UnsupportedFormat(_)) => runner(path),
+        Some(err) => Err(err),
+        None => Err(TossError::other(
+            "no stream of this file could be prepared for playback",
+        )),
+    }
 }
 
 /// Hand over the topology, then start from the beginning.
@@ -844,4 +907,141 @@ fn wide_path(path: &Path) -> Result<Vec<u16>, TossError> {
     wide.push(0);
 
     Ok(wide)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+    use std::path::{Path, PathBuf};
+
+    use super::*;
+    use crate::core::exit_code::ExitCode;
+
+    fn capability() -> TossError {
+        TossError::UnsupportedFormat(PathBuf::from("clip.mkv"))
+    }
+
+    /// The table the retry rule turns on: only the typed capability refusal
+    /// may degrade. `NotImplemented` is the trap — it projects to exit 3 too,
+    /// and the rule must be written on the variant, never the number.
+    #[test]
+    fn only_unsupported_format_is_a_capability_refusal() {
+        let terminal = [
+            TossError::InputNotFound(PathBuf::from("gone.mkv")),
+            TossError::PermissionDenied(PathBuf::from("locked.mkv")),
+            TossError::CorruptInput {
+                path: PathBuf::from("broken.mkv"),
+                context: "damaged header".to_owned(),
+            },
+            TossError::invalid_arguments("not media"),
+            TossError::other("media foundation would not start"),
+        ];
+
+        for err in &terminal {
+            assert!(!is_capability_refusal(err), "must stay terminal: {err:?}");
+        }
+
+        // The same exit code, a different verdict: missing capability is not
+        // the same fact as "this build has no player at all".
+        let not_implemented = TossError::not_implemented("media playback");
+        assert_eq!(not_implemented.exit_code(), ExitCode::UnsupportedFormat);
+        assert!(
+            !is_capability_refusal(&not_implemented),
+            "exit 3 is not the capability signal, the typed variant is"
+        );
+
+        assert!(is_capability_refusal(&capability()));
+    }
+
+    #[test]
+    fn the_software_runner_is_reached_only_for_a_capability_refusal() {
+        let ran = Cell::new(0);
+        let outcome = software_after(Path::new("clip.mkv"), capability(), |_| {
+            ran.set(ran.get() + 1);
+            Ok(())
+        });
+        assert!(outcome.is_ok());
+        assert_eq!(
+            ran.get(),
+            1,
+            "a capability refusal must run the software link"
+        );
+
+        let ran = Cell::new(0);
+        let outcome = software_after(
+            Path::new("broken.mkv"),
+            TossError::CorruptInput {
+                path: PathBuf::from("broken.mkv"),
+                context: "damaged".to_owned(),
+            },
+            |_| {
+                ran.set(ran.get() + 1);
+                Ok(())
+            },
+        );
+        assert!(matches!(outcome, Err(TossError::CorruptInput { .. })));
+        assert_eq!(
+            ran.get(),
+            0,
+            "a corrupt file must not reach the software link"
+        );
+    }
+
+    #[test]
+    fn the_attempts_tail_routes_capability_refusals_and_keeps_the_rest() {
+        let ran = Cell::new(0);
+        let outcome = after_attempts(Path::new("clip.mkv"), Some(capability()), |_| {
+            ran.set(ran.get() + 1);
+            Ok(())
+        });
+        assert!(outcome.is_ok());
+        assert_eq!(ran.get(), 1);
+
+        let ran = Cell::new(0);
+        let outcome = after_attempts(
+            Path::new("clip.mkv"),
+            Some(TossError::other("session would not start")),
+            |_| {
+                ran.set(ran.get() + 1);
+                Ok(())
+            },
+        );
+        assert!(matches!(outcome, Err(TossError::Other(_))));
+        assert_eq!(ran.get(), 0, "a systemic failure is terminal");
+
+        let ran = Cell::new(0);
+        let outcome = after_attempts(Path::new("clip.mkv"), None, |_| {
+            ran.set(ran.get() + 1);
+            Ok(())
+        });
+        assert!(matches!(outcome, Err(TossError::Other(_))));
+        assert_eq!(
+            ran.get(),
+            0,
+            "no recorded failure is not a capability refusal"
+        );
+    }
+
+    #[test]
+    fn audio_only_files_have_no_software_second_opinion() {
+        assert!(carries_video(&[PlannedStream {
+            index: 0,
+            video: true
+        }]));
+        assert!(carries_video(&[
+            PlannedStream {
+                index: 0,
+                video: false
+            },
+            PlannedStream {
+                index: 1,
+                video: true
+            },
+        ]));
+        assert!(!carries_video(&[PlannedStream {
+            index: 0,
+            video: false
+        }]));
+        assert!(!carries_video(&[]));
+    }
 }

@@ -22,8 +22,10 @@
 //! boundary projection happens in `TossError::exit_code`, so the taxonomy
 //! and the exit contract cannot drift apart (7.6-A revision).
 //!
-//! Slice 1 scope: decode capability + its tests. No window, no timing, no
-//! seek, no MF fallback wiring — those are Slices 2 and 3.
+//! Slice 1 scope: decode capability + its tests. Slice 2 added the two
+//! numbers presentation needs — a timestamp and a duration per frame, the
+//! reader's length, and a seek — so the window can pace itself; no window,
+//! no MF fallback wiring (those are the rest of Slice 2 and Slice 3).
 
 use std::ffi::{c_char, c_void};
 use std::path::{Path, PathBuf};
@@ -40,7 +42,9 @@ mod shim_code {
 
 /// One frame as the shim hands it over — mirrors `TossHevcFrame`
 /// field-for-field. `long` is 4 bytes under MSVC's LLP64, which is the
-/// only ABI this module exists on (the gates that include this file).
+/// only ABI this module exists on (the gates that include this file); the
+/// two `long long`s follow it on an 8-byte boundary, which both compilers
+/// place the same way.
 #[repr(C)]
 #[derive(Default)]
 struct ShimFrame {
@@ -50,12 +54,33 @@ struct ShimFrame {
     bytes: i32,
     src_pix_fmt: i32,
     index: i32,
+    pts_100ns: i64,
+    duration_100ns: i64,
 }
 
 unsafe extern "C" {
+    fn toss_hevc_init();
     fn toss_hevc_open(path: *const c_char, err_out: *mut i32) -> *mut c_void;
     fn toss_hevc_next(session: *mut c_void, out: *mut ShimFrame, bgra: *mut *const u8) -> i32;
+    fn toss_hevc_duration(session: *const c_void) -> i64;
+    fn toss_hevc_seek(session: *mut c_void, pos_100ns: i64) -> i32;
     fn toss_hevc_close(session: *mut c_void);
+}
+
+/// Installs FFmpeg's global log callback exactly once for the process.
+///
+/// `cargo test` runs these tests on parallel threads, and the callback lives
+/// in a process-global; reassigning it per session would race. The callback
+/// counts errors per *thread*, so a single installation is enough.
+static LOG_INIT: std::sync::Once = std::sync::Once::new();
+
+/// Install the silent-logging callback before the first session opens.
+fn init_logging() {
+    LOG_INIT.call_once(|| {
+        // SAFETY: called exactly once for the process, before any session
+        // exists; the callback only touches a thread-local counter.
+        unsafe { toss_hevc_init() };
+    });
 }
 
 /// One decoded picture, BGRA8, borrowed from the reader that produced it.
@@ -68,15 +93,25 @@ pub(super) struct BgraFrame<'a> {
     pub(super) width: u32,
     pub(super) height: u32,
     /// Bytes per row: `width * 4` (BGRA8).
+    #[allow(dead_code)] // GDI derives the stride from the width; tests assert it
     pub(super) stride: u32,
     pub(super) data: &'a [u8],
     /// 0-based position of this frame in the presentation.
+    #[allow(dead_code)] // evidence the sequence is gapless; tests read it
     pub(super) index: u64,
     /// The pixel format the *decoder* produced, as FFmpeg's numeric id
     /// (`62` = `yuv420p10le`, the 10-bit Main10 format that is 365/366 of
     /// the corpus). Diagnostic evidence that swscale really converted a
     /// 10-bit source — no FFmpeg type crosses the boundary, only this id.
+    #[allow(dead_code)] // diagnostic only: presentation paces on pts
     pub(super) src_pix_fmt: i32,
+    /// When this picture is due, in 100-ns units from the start of the
+    /// presentation — the number the software window paces on (design §7:
+    /// timing lives with the decoder's own timestamps, not a frame count).
+    pub(super) pts_100ns: i64,
+    /// How long the picture holds, in 100-ns units; never negative (the
+    /// shim substitutes a sensible default when the source has none).
+    pub(super) duration_100ns: i64,
 }
 
 /// A local HEVC file opened for software decoding.
@@ -97,6 +132,8 @@ impl HevcReader {
     /// what FFmpeg wants, and an interior NUL is refused rather than
     /// truncated — the same rule `backend::wide_path` applies to MF.
     pub(super) fn open(path: &Path) -> Result<Self, TossError> {
+        init_logging();
+
         let mut bytes = path.as_os_str().as_encoded_bytes().to_vec();
         if bytes.contains(&0) {
             return Err(TossError::invalid_arguments(format!(
@@ -141,10 +178,32 @@ impl HevcReader {
         match code {
             0 => Ok(None),
             1 => {
-                let len = usize::try_from(raw.bytes).map_err(|_| {
-                    TossError::other("software decode reported a negative frame size")
+                // Validate the shim's shape before trusting a pointer and a
+                // length: a negative dimension or a buffer that does not cover
+                // the picture must be refused, not handed to GDI. These are
+                // numbers a file chose, so the checks are arithmetic on
+                // untrusted input (§23).
+                if raw.width <= 0 || raw.height <= 0 || raw.stride <= 0 || raw.bytes <= 0 {
+                    return Err(TossError::other(
+                        "software decode reported a non-positive frame shape",
+                    ));
+                }
+                let width = raw.width as u32;
+                let height = raw.height as u32;
+                let stride = raw.stride as u32;
+                let expected_stride = width.checked_mul(4).ok_or_else(|| {
+                    TossError::other("software decode reported an unrepresentable width")
                 })?;
-                if bgra.is_null() || raw.stride < raw.width.saturating_mul(4) {
+                let expected_bytes = stride.checked_mul(height).ok_or_else(|| {
+                    TossError::other("software decode reported an unrepresentable height")
+                })?;
+                if stride != expected_stride || raw.bytes as u32 != expected_bytes {
+                    return Err(TossError::other(
+                        "software decode handed back an inconsistent frame",
+                    ));
+                }
+                let len = raw.bytes as usize;
+                if bgra.is_null() || len != (stride as usize) * (height as usize) {
                     return Err(TossError::other(
                         "software decode handed back an inconsistent frame",
                     ));
@@ -152,17 +211,50 @@ impl HevcReader {
                 // SAFETY: on code 1 the shim promises `bgra` points at
                 // `bytes` readable pixels in its own buffer, valid until
                 // the next call on this session — which cannot happen
-                // while `&mut self` is held.
+                // while `&mut self` is held. The length was just checked
+                // against the reported stride and height.
                 let data = unsafe { std::slice::from_raw_parts(bgra, len) };
                 Ok(Some(BgraFrame {
-                    width: raw.width.max(0) as u32,
-                    height: raw.height.max(0) as u32,
-                    stride: raw.stride.max(0) as u32,
+                    width,
+                    height,
+                    stride,
                     data,
                     index: raw.index.max(0) as u64,
                     src_pix_fmt: raw.src_pix_fmt,
+                    pts_100ns: raw.pts_100ns.max(0),
+                    duration_100ns: raw.duration_100ns.max(0),
                 }))
             }
+            other => Err(from_shim(other, &self.path)),
+        }
+    }
+
+    /// How long this presentation is, in 100-ns units.
+    ///
+    /// `i64::MAX` when the container does not say — deliberately the same
+    /// answer MF's probe gives for an unknown length (`u64::MAX`, clamped
+    /// the same way in `backend::play`), so a seek clamp means "no clamp"
+    /// on both paths instead of "zero" on one of them.
+    pub(super) fn duration_100ns(&self) -> i64 {
+        // SAFETY: the session is alive until this reader drops (the `Drop`
+        // below); the call only reads the format context's own length.
+        let duration = unsafe { toss_hevc_duration(self.session) };
+        if duration < 0 { i64::MAX } else { duration }
+    }
+
+    /// Jump to an absolute position (100-ns units) and drop everything the
+    /// old position left behind: the shim flushes its decoder, so the next
+    /// [`Self::next_frame`] answers with a picture from the new place or
+    /// with the end — never one from before the jump.
+    ///
+    /// The step and the clamp belong to the caller (D2's ±5 s is decided
+    /// at the player level, design §12.9); this executes one position.
+    pub(super) fn seek(&mut self, pos_100ns: i64) -> Result<(), TossError> {
+        // SAFETY: the session is alive until this reader drops, and the
+        // position is a plain integer the shim reads by value.
+        let code = unsafe { toss_hevc_seek(self.session, pos_100ns) };
+        match code {
+            0 => Ok(()),
             other => Err(from_shim(other, &self.path)),
         }
     }
@@ -316,6 +408,15 @@ mod tests {
         // matroska wears its header at the front: a file cut mid-stream
         // still opens, still decodes what is there, and ends cleanly —
         // frames first, then `Ok(None)`, never an error mid-delivery.
+        //
+        // This is the accepted "truncated tail" verdict, and it is the
+        // boundary of the CorruptInput rule: a genuinely hard mid-stream
+        // failure (a read or decode returning an error rather than
+        // `AVERROR_EOF`) is `TossError::CorruptInput` via the shim's
+        // `midstream_error`, while a stream that simply stops is this
+        // decode-then-end case. What the two have in common is that FFmpeg
+        // surfaces *both* as an end of stream for this corpus, so the shim
+        // never fabricates a corruption verdict it cannot justify.
         let whole = fs::read(MAIN10_MKV).expect("fixture is readable");
         let cut = scratch("truncated-tail.mkv");
         fs::write(&cut, &whole[..whole.len() / 2]).expect("write the cut");
@@ -379,5 +480,143 @@ mod tests {
         let err =
             HevcReader::open(Path::new("clip\0.mkv")).expect_err("a NUL cannot be part of a path");
         assert!(matches!(err, TossError::InvalidArguments(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn frames_carry_timestamps_the_window_can_pace_on() {
+        // Slice 2's contract with the presentation: every picture says when
+        // it is due and how long it holds, in the 100-ns units D2's seek
+        // step and MF's clock already speak (design §7 — timing lives with
+        // the decoder's timestamps, not with a frame counter).
+        let mut reader = HevcReader::open(Path::new(MAIN10_MKV)).expect("the fixture must open");
+        let duration = reader.duration_100ns();
+        assert!(
+            (5_000_000..=20_000_000).contains(&duration),
+            "one second of video, in 100-ns units: {duration}"
+        );
+
+        let mut previous = -1_i64;
+        let mut count = 0_u64;
+        while let Some(frame) = reader.next_frame().expect("the fixture must decode") {
+            assert!(
+                frame.duration_100ns > 0,
+                "every picture says how long it holds"
+            );
+            assert!(
+                frame.pts_100ns >= previous,
+                "timestamps never run backwards: {} after {previous}",
+                frame.pts_100ns
+            );
+            // Ten frames a second: the nth picture is due n × 100 ms in,
+            // within one frame of encoder rounding.
+            let expected = count as i64 * 1_000_000;
+            assert!(
+                expected.abs_diff(frame.pts_100ns) < 200_000,
+                "frame {count} is due at {expected}, not at {}",
+                frame.pts_100ns
+            );
+            previous = frame.pts_100ns;
+            count += 1;
+        }
+
+        assert_eq!(count, FIXTURE_FRAMES);
+        // The last picture's time plus its length is the presentation's
+        // end: that sum is what the window compares its clock against.
+        assert!(
+            previous < duration,
+            "the last frame must start before the file ends ({previous} vs {duration})"
+        );
+    }
+
+    #[test]
+    fn seeking_lands_no_later_than_the_position_asked_for() {
+        // The seek contract the player relies on (design §12.9): jump, and
+        // resume with a picture from *at or before* the target — never one
+        // past it, which is what would make a Right-arrow skip frames.
+        // The fixture is one long GOP (generate.sh's libx265 defaults), so
+        // "at or before" here means all the way back to the single keyframe;
+        // that is the demuxer honouring the flag, not a bug to pin tighter.
+        let mut reader = HevcReader::open(Path::new(MAIN10_MKV)).expect("the fixture must open");
+
+        let mut seen = 0_i64;
+        for _ in 0..3 {
+            let frame = reader.next_frame().expect("decodes").expect("frames");
+            seen = frame.pts_100ns;
+        }
+
+        reader.seek(5_000_000).expect("a position inside the file");
+        let frame = reader
+            .next_frame()
+            .expect("decoding resumes")
+            .expect("a picture is waiting after the jump");
+        assert!(
+            frame.pts_100ns <= 5_000_000,
+            "never past the target: {}",
+            frame.pts_100ns
+        );
+        assert!(
+            frame.pts_100ns < seen,
+            "the jump rewinds, it does not stall"
+        );
+
+        // And the file still plays out afterwards: a seek must not cost the
+        // rest of the presentation its ending.
+        let mut rest = 0_u64;
+        while reader.next_frame().expect("decodes after a seek").is_some() {
+            rest += 1;
+        }
+        assert!(rest > 0, "frames after the seek must still arrive");
+    }
+
+    #[test]
+    fn seeking_backwards_rewinds_the_clock() {
+        let mut reader = HevcReader::open(Path::new(MAIN10_MKV)).expect("the fixture must open");
+
+        let mut seen = 0_i64;
+        for _ in 0..5 {
+            let frame = reader.next_frame().expect("decodes").expect("frames");
+            seen = frame.pts_100ns;
+        }
+
+        reader.seek(0).expect("the start of the file");
+        let frame = reader
+            .next_frame()
+            .expect("decoding resumes")
+            .expect("the first picture is back");
+        assert!(
+            frame.pts_100ns < seen,
+            "rewind: {} must precede {seen}",
+            frame.pts_100ns
+        );
+    }
+
+    #[test]
+    fn seeking_onto_or_past_the_end_finishes_instead_of_failing() {
+        // P7-C recorded the opposite boundary on the MF side — a seek to
+        // the very end could surface as "corrupt" (exit 6). The software
+        // path must not repeat it: asking for the end lands on the end,
+        // and the next read is a clean end of file.
+        let mut reader = HevcReader::open(Path::new(MAIN10_MKV)).expect("the fixture must open");
+        let duration = reader.duration_100ns();
+        assert!(duration != i64::MAX, "the fixture states its length");
+
+        reader
+            .seek(duration)
+            .expect("landing on the end is not a failure");
+        assert!(
+            reader
+                .next_frame()
+                .expect("still a valid session")
+                .is_none(),
+            "the end of the file is Ok(None), never an error"
+        );
+
+        // Past the end is the same answer: the player clamps D2's step, and
+        // a clamp that overshoots must still finish quietly.
+        let mut reader = HevcReader::open(Path::new(MAIN10_MKV)).expect("reopened");
+        reader
+            .seek(duration + 50_000_000)
+            .expect("past the end is not a failure");
+        assert!(reader.next_frame().expect("valid session").is_none());
     }
 }

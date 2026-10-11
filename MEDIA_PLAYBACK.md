@@ -79,6 +79,15 @@ player was refused for the same reason it is tempting: it hands `pause`,
 `seek` and `volume` to somebody else's program, and Phase 7's five minimum
 goals are Toss's to meet.
 
+> **Superseded in part (2026-10-02, Phase 7.6).** The user adjudicated a
+> bundled software HEVC decoder because Windows ships none and a real HEVC
+> file was unplayable. FFmpeg is now vendored and statically linked **only**
+> as the capability chain's last link (§9, Phase 7.6-C): single-EXE and the
+> no-sidecar rule (§44) are preserved, the build stays LGPL with GPL
+> components off, and the default build changes nothing. The rest of this
+> paragraph — no codec-name routing, no second pipeline, no system default
+> player — stands.
+
 ### The measurement, with its limit stated
 
 What was actually measured, on the machine that *is* the floor:
@@ -486,6 +495,13 @@ to add a branch here.
 | P7-A, the lifecycle (`e6010eb`) | 724,480 | 206,848 | +23,952 / 0 |
 | P7-B, video path (`6e79763`) | 741,376 | 206,848 | +16,896 / 0 |
 
+The Phase 7.6-C software fallback measures **3,589,632 B** `--all-features`
+(dynamic CRT, worker worktree) against **206,848 B** with no features. The
+jump is the FFmpeg decode core finally being *linked*: Slice 1 left the
+vendored library reachable only from tests, so the linker dropped it; Slice
+3 calls it from production, and the decoder is now in the binary. See
+`docs/HEVC_PLAYBACK_WORK_REPORT.md` §5 for the full command record.
+
 `Cargo.lock` untouched across Phase 7 so far — the four console leaves
 accepted with D1 are still the whole dependency change, and a build that
 never asked for `media` still does not carry any of it (206,848 B, byte for
@@ -602,11 +618,54 @@ code. The Media Session + EVR path Toss is on remains functional and is what
 D1 chose, but the recommendation belongs on the record before Phase 8 or a
 renderer change reopens the question — it is a *documented* migration path,
 not a surprise for later.
+---
+
+**Phase 7.6-C complete (2026-10-02).** The software HEVC fallback — the
+capability chain's third link, after Media Foundation's `all → video-only`
+retry both refuse an HEVC file with `MF_E_TOPO_CODEC_NOT_FOUND`. Native
+first, capability-driven, no codec-name routing (`docs/Phase76_Fallback_
+Boundary_Design.md` §4): Media Foundation still plays every file it can, and
+the bundled decoder is reached **only** through a typed
+`TossError::UnsupportedFormat` from the open, the probe or a spent MF
+attempt — never a missing file, a permission wall, a damaged file or a
+systemic failure, each of which stays its own terminal verdict (design §3).
+
+```text
+toss <hevc.mkv>  (machine without an HEVC MFT)
+    MF all streams        -> UnsupportedFormat (MF_E_TOPO_CODEC_NOT_FOUND)
+    MF video-only         -> UnsupportedFormat
+    software (FFmpeg)     -> decodes, GDI letterbox into 640x480, exit 0
+toss <tone.wav>..<tone.mov>  unchanged: MF plays them, software never runs
+truncated.mp4 -> 6   Cargo.toml -> 3   missing -> 4   directory -> 2
+```
+
+The retry rule is now one predicate: only a capability refusal may degrade
+(previously topology/start errors retried indiscriminately, and a
+video-only `UnsupportedFormat` returned before the software link). The
+software path is single-threaded by design (design §7: prove ownership,
+lifetime, pacing and the exit contract first; a decode worker is a later
+measurement, not this milestone). v1 is **silent video only** — no audio
+stream is opened, `Up`/`Down` do nothing, and the console says so in one
+honest line. `Space` pauses; `Left`/`Right` step a fixed ±5 s, clamped into
+the file, with preroll frames decoded but never shown; `F` is pure window
+geometry (there is no renderer interface to ask); `Esc`/`X`, or the
+title-bar cross, exit 0. Pacing follows the file's own PTS on a monotonic
+`std::time::Instant`, not a frame counter. The decoder reuses one BGRA
+buffer across frames — no per-frame allocation — and each timer tick
+decodes a bounded number of pictures so input stays responsive.
+
+Two things the FFmpeg boundary keeps: no `av*` type crosses out of
+`src/platform/windows/media/libav.rs`, and `av_log` prints nothing (`config.h`
+is checked at build time for `CONFIG_GPL 0` / `CONFIG_NONFREE 0` — the
+vendored build stays LGPL and needs no GPL component). `docs/HEVC_PLAYBACK_
+WORK_REPORT.md` carries the commands, exit codes and measured sizes.
 ## 10. Non-goals
 
 Repeated because they are what gets added "while we are in here":
 
-- No FFmpeg, no bundled codecs, no sidecar runtime (§44).
+- No FFmpeg, no bundled codecs, no sidecar runtime (§44). *(Amended
+  2026-10-02: FFmpeg is vendored as the capability fallback's decoder only
+  — statically linked, LGPL, no sidecar; see §9, Phase 7.6-C.)*
 - No progress bar, volume slider, playlist, OSD, subtitle UI, media library.
 - No `AudioBackend`; no second pipeline for audio files.
 - No metadata subsystem.

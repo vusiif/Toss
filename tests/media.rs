@@ -124,3 +124,32 @@ fn plays_a_tone_all_the_way_to_its_end() {
         );
     }
 }
+
+/// The capability chain, end to end, on an HEVC file.
+///
+/// On the floor machine Windows ships no HEVC Media Foundation transform, so
+/// Media Foundation refuses this file twice (all streams, then video-only)
+/// and the bundled software decoder is the chain's third link; on a machine
+/// that *does* have an HEVC MFT, Media Foundation plays it and the software
+/// path is never reached. Either way the file plays to its end and the
+/// process exits 0, which is the whole contract. Ignored because it opens a
+/// window and needs a desktop; run with `cargo test -- --ignored`.
+#[test]
+#[ignore = "needs Windows, the media feature, and a desktop"]
+fn an_hevc_file_plays_through_the_capability_chain() {
+    #[cfg(not(all(windows, feature = "media")))]
+    return;
+
+    #[cfg(all(windows, feature = "media"))]
+    {
+        let fixture = corpus().join("hevc.mkv");
+        let output = toss(&[&fixture.to_string_lossy()]);
+
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "an HEVC file must play through the capability chain: {}",
+            reported(&output)
+        );
+    }
+}

@@ -31,10 +31,10 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::WindowsAndMessaging::{
     CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GWLP_USERDATA,
     GetMessageW, GetSystemMetrics, GetWindowLongPtrW, GetWindowRect, HWND_NOTOPMOST, HWND_TOPMOST,
-    IDC_ARROW, IsWindow, LoadCursorW, MSG, PostQuitMessage, RegisterClassExW, SM_CXSCREEN,
-    SM_CYSCREEN, SW_SHOW, SetForegroundWindow, SetTimer, SetWindowLongPtrW, SetWindowPos,
-    ShowWindow, TranslateMessage, WM_DESTROY, WM_KEYDOWN, WM_NCDESTROY, WM_TIMER, WNDCLASS_STYLES,
-    WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
+    IDC_ARROW, IsWindow, LoadCursorW, MSG, PM_REMOVE, PeekMessageW, PostQuitMessage,
+    RegisterClassExW, SM_CXSCREEN, SM_CYSCREEN, SW_SHOW, SetForegroundWindow, SetTimer,
+    SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, WM_DESTROY, WM_KEYDOWN,
+    WM_NCDESTROY, WM_QUIT, WM_TIMER, WNDCLASS_STYLES, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
 };
 use windows::core::{HSTRING, PCWSTR, w};
 /// Class name for the media window.
@@ -168,23 +168,37 @@ pub(super) fn run(
         duration,
         saved_rect: (0, 0, 0, 0),
     });
+    // A previous attempt's torn-down window may have posted a `WM_QUIT` that
+    // would stop this loop before it starts. Discard it *before* attaching or
+    // showing this window; draining after `ShowWindow`/`UpdateWindow` could
+    // discard this window's own quit.
+    drain_stale_quit();
+
     // SAFETY: `state` is a live box that outlives the loop below, and
     // `GWLP_USERDATA` is the slot Windows reserves for exactly this use.
     // Attaching after creation, as Phase 6 does: anything that arrived
     // during `CreateWindowExW` found an empty slot and fell through.
-    unsafe {
+    let timer = unsafe {
         SetWindowLongPtrW(
             window.handle,
             GWLP_USERDATA,
             std::ptr::from_ref(&*state).addr() as isize,
         );
+        // SAFETY: the timer dies with the window; zero means it was never
+        // installed, which is a real failure rather than a detail to ignore.
+        SetTimer(Some(window.handle), TIMER_PUMP, PUMP_INTERVAL_MS, None)
+    };
+    if timer == 0 {
+        detach_and_destroy(window.handle);
+        return Err(TossError::other(
+            "media playback could not start its event timer",
+        ));
     }
-    // SAFETY: both calls take the live handle this window owns; `SetTimer`
-    // answers with the previous timer id (none of ours) and `ShowWindow`
-    // with the prior visibility — neither is an outcome to act on. The
-    // timer dies with the window, so there is nothing to pair by hand.
+    // SAFETY: the live handle this window owns; `ShowWindow` and
+    // `SetForegroundWindow` return prior visibility and focus, and
+    // `UpdateWindow` only marks the window for painting — none is an outcome
+    // to act on.
     unsafe {
-        let _ = SetTimer(Some(window.handle), TIMER_PUMP, PUMP_INTERVAL_MS, None);
         let _ = ShowWindow(window.handle, SW_SHOW);
         // The picture window has to *hold* the keyboard, not merely exist:
         // keys go to whichever window has focus, and on the dropped-file
@@ -193,14 +207,17 @@ pub(super) fn run(
         let _ = SetForegroundWindow(window.handle);
         let _ = UpdateWindow(window.handle);
     }
+
     let mut message = MSG::default();
+    let mut failure: Option<TossError> = None;
     loop {
         // SAFETY: `message` is valid writable storage and no other loop
         // runs in this thread. Positive = a message, zero = `WM_QUIT`,
         // negative = failure — read as a number, never as a boolean.
         let arrived = unsafe { GetMessageW(&mut message, None, 0, 0) };
         if arrived.0 < 0 {
-            return Err(TossError::other("media playback lost its message queue"));
+            failure = Some(TossError::other("media playback lost its message queue"));
+            break;
         }
         if arrived.0 == 0 {
             break;
@@ -211,14 +228,43 @@ pub(super) fn run(
             DispatchMessageW(&message);
         }
     }
-    // The window is gone (its `WM_NCDESTROY` cleared the slot), so `state`
-    // is nobody's but this frame's: read the outcome and drop it. `window`'s
-    // own `Drop` sweeps anything an error path left standing.
-    let outcome = state.error.take();
+
+    // Every way out detaches the state from a possibly-live window and
+    // destroys it *while `state` is alive*: a `WM_QUIT` or a dead queue must
+    // not leave a live window holding a dangling address. `window`'s own
+    // `Drop` then sweeps anything still standing.
+    detach_and_destroy(window.handle);
+
+    let outcome = state.error.take().or(failure);
     drop(state);
     match outcome {
         Some(err) => Err(err),
         None => Ok(()),
+    }
+}
+
+/// Discard any `WM_QUIT` a previous window left in this thread's queue.
+fn drain_stale_quit() {
+    let mut message = MSG::default();
+    // SAFETY: `message` is writable storage; the filter is exactly `WM_QUIT`
+    // and `PM_REMOVE` discards it — only quit messages are touched.
+    unsafe { while PeekMessageW(&mut message, None, WM_QUIT, WM_QUIT, PM_REMOVE).as_bool() {} }
+}
+
+/// Detach the state pointer from `window` and destroy it if still live.
+///
+/// Called while the state is still alive on every exit and error path: a
+/// `WM_QUIT` can arrive with the window standing, and dropping the state
+/// before the window would leave a live procedure holding a dangling address.
+fn detach_and_destroy(window: HWND) {
+    // SAFETY: `window` was created by this thread; clearing the slot stops
+    // any later message reaching the state, and `IsWindow` guards the destroy
+    // so an already-closed window is not destroyed twice.
+    unsafe {
+        SetWindowLongPtrW(window, GWLP_USERDATA, 0);
+        if IsWindow(Some(window)).as_bool() {
+            let _ = DestroyWindow(window);
+        }
     }
 }
 /// The window procedure: host the timer, and nothing else.
@@ -340,7 +386,11 @@ unsafe extern "system" fn window_proc(
                 }
                 LRESULT(0)
             }
-            WM_DESTROY => {
+            // Only a window that actually ran has state attached; a window
+            // destroyed before `run` (a failed attempt's `Drop`) must not
+            // post a quit nobody is waiting for — that stale `WM_QUIT` is
+            // what would stop the *next* attempt's loop before it starts.
+            WM_DESTROY if slot != 0 => {
                 PostQuitMessage(0);
                 LRESULT(0)
             }
