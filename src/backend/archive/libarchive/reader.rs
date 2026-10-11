@@ -1140,7 +1140,7 @@ mod tests {
         // every assertion above by asserting nothing. The floor is the number
         // of samples committed today, so a deleted fixture is noticed too.
         assert!(
-            checked >= 19,
+            checked >= 24,
             "expected the whole corpus to run, only checked {checked}"
         );
     }
