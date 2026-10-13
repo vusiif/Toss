@@ -13,6 +13,7 @@
 # agents; a rule nobody can see after cloning is not a rule.
 *.md
 !README.md
+!TESTING.md
 !ARCHIVE_BACKEND.md
 !IMAGE_VIEWER.md
 !MEDIA_PLAYBACK.md
