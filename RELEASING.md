@@ -8,6 +8,30 @@ authority for this tool and their legal wording is not imported here.
 
 ## Tools
 
+### v0.1.0 baseline decision (2026-10-15)
+
+The maintainer chose to publish a first functional baseline and collect
+remaining media/GUI feedback after release. Current Tiny10 startup and archive
+evidence is accepted; no-extra-runtime and stock Win10 22H2 runs are optional
+future coverage. TESTING.md retains every unverified functional item without
+claiming it passed. Archive resource caps remain deferred to v0.2.
+
+Freeze the release commit before building. Use a clean checkout of that commit
+so local `.sandbox-test/`, unrelated untracked sources, caches and diagnostics
+cannot enter the source package. Build with the existing locked offline
+all-features recipe and verify the assembled local package at Full level.
+
+Public assets are a Windows x64 binary ZIP (executable, licenses, notices and
+build information), matching first-party/vendored source ZIP, locked crate
+source ZIP, source manifest and SHA256SUMS. The local-draft builder's
+LOCAL-DRAFT.md and local-only status record are preparation evidence rather
+than the public release wrapper. Record the actual source commit, build
+command, executable hash and known limitations in the public build information
+and release notes. Publish assets and source together under the same tag.
+
+README remains unchanged during preparation; its update is deferred until
+after the first release as requested by the maintainer.
+
 ```text
 scripts/New-ReleasePackage.ps1    create a local-draft package
 scripts/Test-ReleasePackage.ps1   verify a package; fixture self-tests; smoke run
@@ -122,7 +146,7 @@ arguments):
   hash and count, artifact hashes, build mode/exit, freshness flag,
   development-state consistency, and the **non-claims block** (local draft,
   no legal clearance, no reproducibility guarantee, no byte-identical
-  rebuild claim, TESTING checkboxes not asserted, R1/M1 kept open);
+  rebuild claim, TESTING checkboxes not asserted, R1/M1 assessment retained);
 * GPL/notice text sanity and the executable's MZ signature;
 * source zip entry set equals `SOURCE_MANIFEST.sha256` (Quick), and at
   Full level every entry is decompressed and re-hashed against it;
@@ -149,8 +173,36 @@ license file, `Cargo.lock` crate absent from the registry cache, overwrite
 attempt on an existing package, strict vs `-AllowDirty` dirty policy,
 output outside the workspace, missing/non-MZ/stale executable, tampered
 executable, rewritten and malformed manifests, extra/missing package files,
-tampered source-zip content, crate-zip gap, unicode/space paths, and CLI
-wiring of `-Mode Verify`. Logs: `docs/release-work/logs/selftest-*.log`.
+tampered source-zip content, crate-zip gap, unicode/space paths, directory
+junction output, and reparse-point/symlink source input.
+
+### Self-test status reporting and exit policy
+
+* **Status distinction**: Test results in console and summary logs distinguish
+  `PASS`, `FAIL`, and `SKIP`. Every skip records a non-empty diagnostic reason
+  (e.g., environment without symlink privileges) and never passes. Real
+  assertion failures always fail and never convert into skips.
+* **Count invariant**: `passed + failed + skipped = total` is asserted strictly
+  at summary time.
+* **Default exit policy for skipped capability tests**: By default, skipped tests
+  due to unavailable host capabilities (such as unprivileged symlink or junction
+  creation) do not fail the overall run (exit 0) if all executed assertions pass,
+  preserving compatibility for unprivileged test runners while reporting the skip
+  truthfully in console and summary logs (`<test>=SKIP: <reason>`). No claim of
+  all-capability coverage is made when skips occur. If any test fails, the run exits 1.
+* **Deterministic simulation**: Setting `$env:TOSS_TEST_FORCE_UNAVAILABLE` to
+  `symlink`, `junction`, or `all` allows exercising the capability-unavailable
+  code paths deterministically in automated testing without changing host privileges.
+Logs: `docs/release-work/logs/selftest-*.log`.
+
+Latest local verification (2026-10-15, explicitly authorized host PowerShell 7,
+not isolated): normal suite 24 PASS / 0 FAIL / 0 SKIP; forced-unavailable suite
+22 PASS / 0 FAIL / 2 SKIP; both exit 0. T24 now inserts its deliberate failure
+before the final summary marker only, avoiding replacement of its own marker
+literal. The actual timeout helper was also checked with a sleeping child:
+the two-second limit triggered and the child exited. Local evidence is under
+`.sandbox-test/results/release-confirm-20261015/`; this does not replace a
+real candidate build or clean-machine runtime validation.
 
 ## Smoke run (real repository, real build)
 
@@ -166,17 +218,31 @@ result at Full level, and writes evidence to
 `docs/release-work/logs/smoke-pack-*.log`, `smoke-verify-*.log` and
 `smoke-summary-*.log` (including the out-of-band `manifest_sha256`).
 
-## Open decision conditions (kept, not resolved here)
+## Recorded CRT licensing position
 
 * **R1** — whether the statically linked MSVC CRT qualifies as a GPL-3.0
   System Library (`docs/LICENSE_AUDIT_REPORT.md` §4.3).
 * **M1** — Microsoft Distributable Code authorization for the embedded
   static CRT object code (§4.2).
 
-Both remain **unresolved release-blocking questions**. This tool claims no
-legal clearance and does not alter the project's GPL-3.0-or-later license.
-An independent license compliance review is still required before any
-publication.
+On 2026-10-15 the maintainer confirmed eligible Visual Studio Community
+personal/free use as the current builder's license basis. The project records
+the following supported engineering position: the normal compiler CRT is
+treated as a GPL-3 System Library, and deployment of the statically linked
+application relies on Microsoft's documented static-link deployment method,
+subject to the applicable product license. Static embedding and absence of
+standalone `.lib` entries from a runtime-file list do not by themselves prove
+incompatibility. R1/M1 are recorded interpretations rather than unconditional
+implementation blockers; they must be reassessed if the toolchain or license
+basis changes.
+
+Primary references: [GNU System Library FAQ](https://www.gnu.org/licenses/gpl-faq.en.html#SystemLibraryException),
+[Microsoft deployment guidance](https://learn.microsoft.com/en-us/cpp/windows/deployment-in-visual-cpp),
+and [Microsoft licensing guidance](https://www.microsoft.com/licensing/guidance/Visual-Studio).
+The latter is guidance and defers to the actual agreement; it is not a blanket
+grant covering arbitrary Microsoft libraries. No legal guarantee, CRT relicensing
+or future builder license attestation is made by the tooling. GPL-3.0-or-later,
+required notices/source delivery, and the separate publication decision remain.
 
 ## Explicit non-goals of this slice
 

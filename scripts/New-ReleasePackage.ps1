@@ -695,8 +695,9 @@ been uploaded, published or conveyed anywhere. Verify it with:
 
 * No legal clearance is claimed. The static-CRT questions **R1** (GPL-3.0
   System Library applicability) and **M1** (Microsoft Distributable Code
-  authorization) remain open decision conditions; see RELEASING.md and
-  docs/LICENSE_AUDIT_REPORT.md.
+  authorization) have a documented project interpretation; see RELEASING.md.
+  This tool does not attest the current builder's license or replace the
+  applicable agreement. Reassess when the toolchain or license basis changes.
 * No reproducibility or byte-identical rebuild is claimed.
 * TESTING.md checkboxes are neither required nor asserted by this package.
 * This package is not a release artifact; publishing is a separate,
@@ -767,8 +768,8 @@ been uploaded, published or conveyed anywhere. Verify it with:
             testing_checklists_asserted    = $false
         }
         open_decision_conditions = @(
-            'R1: static MSVC CRT as GPL-3.0 System Library applicability (docs/LICENSE_AUDIT_REPORT.md section 4.3) - UNRESOLVED'
-            'M1: Microsoft Distributable Code authorization for the embedded static CRT (docs/LICENSE_AUDIT_REPORT.md section 4.2) - UNRESOLVED'
+            'R1: normal compiler CRT treated as GPL-3.0 System Library - DOCUMENTED PROJECT INTERPRETATION (RELEASING.md); reassess for toolchain changes'
+            'M1: static application deployment relies on applicable Microsoft product license and deployment guidance - DOCUMENTED PROJECT INTERPRETATION (RELEASING.md); builder license not attested by this tool'
         )
     }
     $provenanceText = $provenance | ConvertTo-Json -Depth 8

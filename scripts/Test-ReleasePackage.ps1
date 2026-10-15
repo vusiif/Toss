@@ -46,6 +46,9 @@ param(
 
     [string]$LogDir = '',
 
+    # Internal / testing only: run a specific subset of tests to avoid recursion in meta-tests
+    [string]$Subset = '',
+
     # Smoke mode only: pass -AllowDirty through to the packager so a working
     # tree with uncommitted tracked edits can still be packaged, with the
     # dirty state recorded truthfully in PROVENANCE.json.
@@ -509,7 +512,12 @@ function Add-Detail([string]$Text) {
 }
 
 function Invoke-Capture {
-    param([string]$FilePath, [string[]]$ArgumentList = @(), [string]$WorkingDirectory = '')
+    param(
+        [string]$FilePath,
+        [string[]]$ArgumentList = @(),
+        [string]$WorkingDirectory = '',
+        [int]$TimeoutSeconds = 60
+    )
     $psi = [System.Diagnostics.ProcessStartInfo]::new()
     $psi.FileName = $FilePath
     foreach ($a in $ArgumentList) { [void]$psi.ArgumentList.Add($a) }
@@ -521,8 +529,13 @@ function Invoke-Capture {
     $psi.StandardErrorEncoding = [System.Text.UTF8Encoding]::new($false)
     $proc = [System.Diagnostics.Process]::Start($psi)
     $errTask = $proc.StandardError.ReadToEndAsync()
-    $out = $proc.StandardOutput.ReadToEnd()
-    $proc.WaitForExit()
+    $outTask = $proc.StandardOutput.ReadToEndAsync()
+    $exited = $proc.WaitForExit([int]($TimeoutSeconds * 1000))
+    if (-not $exited) {
+        try { $proc.Kill($true) } catch { }
+        throw "Process '$FilePath $($ArgumentList -join ' ')' timed out after $TimeoutSeconds seconds"
+    }
+    $out = $outTask.GetAwaiter().GetResult()
     $err = $errTask.GetAwaiter().GetResult()
     return [pscustomobject]@{ Exit = $proc.ExitCode; Out = $out; Err = $err }
 }
@@ -631,18 +644,43 @@ function New-BasicPackage {
     return [pscustomobject]@{ Repo = $repo; Exe = $exe; Pkg = $pkg }
 }
 
+# Custom exception type for skipped capability tests
+class TestSkippedException : System.Exception {
+    TestSkippedException([string]$message) : base($message) {}
+}
+
 $results = [System.Collections.Generic.List[object]]::new()
+
+function Set-TestSkipped {
+    param([Parameter(Mandatory)][string]$Reason)
+    if ([string]::IsNullOrWhiteSpace($Reason)) {
+        throw "Set-TestSkipped requires a non-empty reason"
+    }
+    throw [TestSkippedException]::new($Reason)
+}
 
 function Invoke-Test {
     param([string]$Name, [scriptblock]$Action)
+    if ($Subset -and $Subset -ne 'all') {
+        $allowed = @($Subset -split ',')
+        if ($allowed -notcontains $Name) {
+            return
+        }
+    }
     try {
         & $Action | Out-Null
-        [void]$results.Add([pscustomobject]@{ Name = $Name; Ok = $true; Detail = '' })
+        [void]$results.Add([pscustomobject]@{ Name = $Name; Status = 'PASS'; Detail = '' })
         Write-Output "[PASS] $Name"
     }
+    catch [TestSkippedException] {
+        $skipReason = $_.Exception.Message
+        [void]$results.Add([pscustomobject]@{ Name = $Name; Status = 'SKIP'; Detail = $skipReason })
+        Write-Output "[SKIP] $Name : $skipReason"
+    }
     catch {
-        [void]$results.Add([pscustomobject]@{ Name = $Name; Ok = $false; Detail = $_.Exception.Message })
-        Write-Output "[FAIL] $Name : $($_.Exception.Message)"
+        $failMsg = $_.Exception.Message
+        [void]$results.Add([pscustomobject]@{ Name = $Name; Status = 'FAIL'; Detail = $failMsg })
+        Write-Output "[FAIL] $Name : $failMsg"
     }
 }
 
@@ -901,6 +939,11 @@ Invoke-Test 'verify_detects_crate_zip_gap' {
 
 # T21: packager refuses an OutputRoot containing a directory junction.
 Invoke-Test 'packager_refuses_junction_output' {
+    $forceUnavailable = ($env:TOSS_TEST_FORCE_UNAVAILABLE -eq 'junction' -or $env:TOSS_TEST_FORCE_UNAVAILABLE -eq 'all')
+    if ($forceUnavailable) {
+        Set-TestSkipped 'forced capability unavailable: directory junction creation disabled by test harness'
+    }
+
     $repo = Join-Path $runRoot 'junction repo'
     New-FixtureRepo -Dir $repo
     $exe = Join-Path $runRoot 'junction exe\toss.exe'
@@ -933,12 +976,17 @@ Invoke-Test 'packager_refuses_junction_output' {
         Assert ($targetChildren.Count -eq 1 -and $targetChildren[0] -eq 'canary.txt') 'target directory remains completely untouched'
     }
     else {
-        Add-Detail "NOTICE: environment does not permit creating directory junction; skipping junction test"
+        Set-TestSkipped 'environment does not permit creating directory junction'
     }
 }
 
 # T22: packager refuses source inventory files that are reparse points / symlinks.
 Invoke-Test 'packager_refuses_reparse_source_input' {
+    $forceUnavailable = ($env:TOSS_TEST_FORCE_UNAVAILABLE -eq 'symlink' -or $env:TOSS_TEST_FORCE_UNAVAILABLE -eq 'all')
+    if ($forceUnavailable) {
+        Set-TestSkipped 'forced capability unavailable: file symlink creation disabled by test harness'
+    }
+
     $repo = Join-Path $runRoot 'linksrc repo'
     New-FixtureRepo -Dir $repo
     $exe = Join-Path $runRoot 'linksrc exe\toss.exe'
@@ -960,20 +1008,98 @@ Invoke-Test 'packager_refuses_reparse_source_input' {
         Assert ($res.Text -match 'reparse point|symlink') 'diagnostic mentions reparse/symlink'
     }
     else {
-        Add-Detail "NOTICE: unprivileged environment does not permit file symlink creation; skipped file symlink test"
+        Set-TestSkipped 'unprivileged environment does not permit file symlink creation'
     }
+}
+
+# T23: meta-regression: forced capability unavailability produces honest SKIP in summary/console and exits 0 by default exit policy.
+Invoke-Test 'selftest_forced_unavailable_reports_skip' {
+    $probeScript = Join-Path $runRoot 'probe-skip.ps1'
+    $probeLogDir = Join-Path $runRoot 'probe-skip-logs'
+    [void](New-Item -ItemType Directory -Force -Path $probeLogDir)
+    $probeText = @"
+`$env:TOSS_TEST_FORCE_UNAVAILABLE = 'symlink'
+& '$script:SelfPath' -Mode SelfTest -Subset 'packager_refuses_reparse_source_input' -LogDir '$probeLogDir'
+exit `$LASTEXITCODE
+"@
+    Write-Utf8NoBom -Path $probeScript -Text $probeText
+    $res = Invoke-Capture -FilePath 'pwsh' -ArgumentList @('-NoProfile', '-File', $probeScript) -TimeoutSeconds 30
+    Assert ($res.Exit -eq 0) "forced unavailable probe expected exit 0 under default exit policy, got $($res.Exit). stderr: $($res.Err)"
+    Assert ($res.Out -match '\[SKIP\] packager_refuses_reparse_source_input : forced capability unavailable') 'console output shows distinct [SKIP] with reason'
+    Assert ($res.Out -match 'passed=0 failed=0 skipped=1 total=1') 'console summary counts skipped=1 and passed=0 failed=0'
+    Assert ($res.Out -match 'SKIP\s+packager_refuses_reparse_source_input\s+::\s+forced capability unavailable') 'console summary listing preserves SKIP and reason'
+    # Check the written summary log file in probeLogDir
+    $summaryLogLine = @($res.Out -split "`r?`n" | Where-Object { $_ -like 'summary_log=*' }) | Select-Object -First 1
+    Assert ($null -ne $summaryLogLine) 'summary_log path printed in child probe output'
+    $childSummaryLog = $summaryLogLine -replace '^summary_log=', ''
+    Assert (Test-Path -LiteralPath $childSummaryLog) 'child probe summary log exists on disk'
+    $childSummaryContent = [System.IO.File]::ReadAllText($childSummaryLog)
+    Assert ($childSummaryContent -match 'packager_refuses_reparse_source_input=SKIP: forced capability unavailable') 'child summary file records SKIP and reason'
+}
+
+# T24: meta-regression: genuine assertion failure in a capability test always reports FAIL and exits nonzero.
+Invoke-Test 'selftest_assertion_failure_reports_fail' {
+    $probeLogDir = Join-Path $runRoot 'probe-fail-logs'
+    [void](New-Item -ItemType Directory -Force -Path $probeLogDir)
+    # Create a small derivative copy of the actual runner script with an appended deliberate assertion failure test,
+    # ensuring that the production Invoke-Test, invariant, summary reporting, and exit 1 paths are exercised directly.
+    $runnerCopy = Join-Path $runRoot 'Test-ReleasePackage-ProbeFail.ps1'
+    $runnerCode = [System.IO.File]::ReadAllText($script:SelfPath)
+    $injectedFailTest = @"
+
+# Injected deliberate failure test to exercise actual production runner failure path
+Invoke-Test 'probe_deliberate_production_failure' {
+    Assert `$false 'deliberate assertion failure exercising production runner'
+}
+"@
+    # Insert right before summary section
+    $summaryMarker = '# --- summary ---------------------------------------------------------------'
+    $summaryOffset = $runnerCode.LastIndexOf($summaryMarker, [System.StringComparison]::Ordinal)
+    Assert ($summaryOffset -ge 0) 'production summary marker exists'
+    $modifiedCode = $runnerCode.Insert($summaryOffset, ($injectedFailTest + "`r`n"))
+    Write-Utf8NoBom -Path $runnerCopy -Text $modifiedCode
+
+    $res = Invoke-Capture -FilePath 'pwsh' -ArgumentList @('-NoProfile', '-File', $runnerCopy, '-Mode', 'SelfTest', '-Subset', 'probe_deliberate_production_failure', '-LogDir', $probeLogDir) -TimeoutSeconds 30
+    Assert ($res.Exit -eq 1) "deliberate assertion failure in production runner expected exit 1, got $($res.Exit). stderr: $($res.Err)"
+    Assert ($res.Out -match '\[FAIL\] probe_deliberate_production_failure : assertion failed: deliberate assertion failure exercising production runner') 'console shows distinct [FAIL]'
+    Assert ($res.Out -match 'passed=0 failed=1 skipped=0 total=1') 'console summary counts passed=0 failed=1 skipped=0 total=1'
+    Assert ($res.Out -match 'FAIL\s+probe_deliberate_production_failure\s+::\s+assertion failed') 'console summary listing records FAIL'
+
+    # Check the written summary log file in probeLogDir
+    $summaryLogLine = @($res.Out -split "`r?`n" | Where-Object { $_ -like 'summary_log=*' }) | Select-Object -First 1
+    Assert ($null -ne $summaryLogLine) 'summary_log path printed in child probe output'
+    $childSummaryLog = $summaryLogLine -replace '^summary_log=', ''
+    Assert (Test-Path -LiteralPath $childSummaryLog) 'child probe summary log exists on disk'
+    $childSummaryContent = [System.IO.File]::ReadAllText($childSummaryLog)
+    Assert ($childSummaryContent -match 'failed=1') 'child summary file records failed=1'
+    Assert ($childSummaryContent -match 'skipped=0') 'child summary file records skipped=0'
+    Assert ($childSummaryContent -match 'total=1') 'child summary file records total=1'
+    Assert ($childSummaryContent -match 'probe_deliberate_production_failure=FAIL: assertion failed') 'child summary file records test failure reason'
 }
 
 # --- summary ---------------------------------------------------------------
 
-$passed = @($results | Where-Object Ok).Count
-$failed = @($results | Where-Object { -not $_.Ok }).Count
+$passed = @($results | Where-Object Status -eq 'PASS').Count
+$failed = @($results | Where-Object Status -eq 'FAIL').Count
+$skipped = @($results | Where-Object Status -eq 'SKIP').Count
+$total = $results.Count
+
+# Invariant check: pass + fail + skip must equal total
+Assert ($passed + $failed + $skipped -eq $total) "Invariant violation: passed ($passed) + failed ($failed) + skipped ($skipped) != total ($total)"
+
 Write-Output '---'
 Write-Output "selftest_run_root=$runRoot"
-Write-Output "passed=$passed failed=$failed total=$($results.Count)"
+Write-Output "passed=$passed failed=$failed skipped=$skipped total=$total"
 foreach ($r in $results) {
-    if ($r.Ok) { Write-Output ("  PASS  {0}" -f $r.Name) }
-    else { Write-Output ("  FAIL  {0} :: {1}" -f $r.Name, $r.Detail) }
+    if ($r.Status -eq 'PASS') {
+        Write-Output ("  PASS  {0}" -f $r.Name)
+    }
+    elseif ($r.Status -eq 'SKIP') {
+        Write-Output ("  SKIP  {0} :: {1}" -f $r.Name, $r.Detail)
+    }
+    else {
+        Write-Output ("  FAIL  {0} :: {1}" -f $r.Name, $r.Detail)
+    }
 }
 
 $summaryText = @"
@@ -982,8 +1108,13 @@ run_root=$runRoot
 detail_log=$detailLog
 passed=$passed
 failed=$failed
-total=$($results.Count)
-$((($results | ForEach-Object { '{0}={1}' -f $_.Name, $(if ($_.Ok) { 'PASS' } else { "FAIL: $($_.Detail)" }) }) -join "`n"))
+skipped=$skipped
+total=$total
+$((($results | ForEach-Object {
+    if ($_.Status -eq 'PASS') { '{0}=PASS' -f $_.Name }
+    elseif ($_.Status -eq 'SKIP') { '{0}=SKIP: {1}' -f $_.Name, $_.Detail }
+    else { '{0}=FAIL: {1}' -f $_.Name, $_.Detail }
+}) -join "`n"))
 "@
 Write-Utf8NoBom -Path $summaryLog -Text ($summaryText + "`n")
 Write-Utf8NoBom -Path $detailLog -Text (($script:DetailLines -join "`n") + "`n")

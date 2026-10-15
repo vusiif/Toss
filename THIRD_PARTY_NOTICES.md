@@ -167,12 +167,15 @@ without overclaiming:
   listed on the Distributable List" (VC Runtime merge modules and
   `VC\redist` files); the static `.lib` is not on that list, and the
   build-tool use grant authorizes building, not distribution.
-- A **scoped, unsettled authorization question remains** (M1 in the
-  audit): whether the exact terms affirmatively authorize conveying a
-  binary containing the *unlisted* static CRT object code. The read
-  clauses neither expressly grant nor forbid it. This is not a finding of
-  infringement, and the proprietary CRT is **not** claimed to be GPL or
-  relicensed by Toss.
+- The 2026-10-15 release assessment records a supported project
+  interpretation: the normal compiler CRT is treated as a GPL-3 System
+  Library, and static application deployment relies on Microsoft's
+  documented deployment method under the applicable product license.
+  The maintainer confirmed eligible Community personal/free use for the
+  current build. A missing standalone `.lib` entry alone does not establish
+  a deployment ban. This is not a blanket license grant or legal guarantee;
+  the proprietary CRT is not GPL-relicensed by Toss. Reassess when the
+  toolchain or license basis changes. References and scope: `RELEASING.md`.
 
 ### Vendored FFmpeg (enters with the HEVC decode core)
 
@@ -221,7 +224,8 @@ wording for each item: `docs/LICENSE_AUDIT_REPORT.md` §6–§7.
    `docs/LICENSE_AUDIT_REPORT.md`: **R1** (§4.3 — whether the static CRT
    qualifies as a GPL-3 §1 System Library; the carve-out text itself
    exists) and **M1** (§4.2 — distribution authorization of the embedded
-   CRT). No absolute verdict is claimed.
+   CRT). The 2026-10-15 documented interpretation in `RELEASING.md`
+   supersedes their historical unresolved status; no absolute verdict is claimed.
 3. **Ship with the exe**: `LICENSE`, this file, the notices file built
    from `docs/RELEASE_NOTICES_DRAFT.md`, and
    `third_party/ffmpeg/COPYING.LGPLv2.1`.
