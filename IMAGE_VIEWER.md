@@ -98,9 +98,9 @@ Both answer to what a person sees, and both stay behind this same boundary:
   is also what leaves room for the console of §12 on the same display, and
   everything past the cap is what panning (M5) exists for. Where the cap
   bites, M3's "client rectangle matches the picture" gives way
-  deliberately: the picture is drawn one to one and the window shows part of
-  it. Fit-*to*-window — scaling the *picture* to the window — remains §11's
-  "not yet".
+  deliberately. The viewer now scales the picture to fit the resulting
+  client area on open and after browsing; `1` restores actual size and pan
+  exposes any content beyond the window.
 
 ---
 
@@ -870,15 +870,12 @@ M10 dd77603  this measurement, closed out in §9
 
 ### 13.9 Known limitations
 
-- **No fit-to-window**: the picture is drawn at 100% and the window shows
-  part of it when it is large (§11's "not yet"). Together with the zoom
-  ladder's one-notch-per-doubling, this is the pool's "spacing is too big"
-  complaint — a **zoom slider** is the recorded direction, and it will move
-  the Toss-owned ladder, so it arrives with a decision of its own.
-- **Zoom anchor is the top-left corner**, not under the pointer.
-- **No cursor feedback while dragging** (hand or move cursor) — `IDC_HAND`
-  and `WM_SETCURSOR` are inside the already-enabled feature, so this one
-  costs no dependency decision, only the work.
+- **Fit follows explicit actions**, not continuous window resizing: open,
+  previous/next and `F` calculate against the current client area. Press `F`
+  again after manually resizing. Fit never enlarges small images and may go
+  below the wheel ladder's 25% rung for very large images.
+- **Wheel zoom still uses coarse steps**. It anchors to the pointer, subject
+  to the pan bounds; fitting on an axis pins that axis to the top-left edge.
 - **Zooming flashes** — decided against for now (§8), with double buffering
   written down as the known cure and its ~183 MiB cost for an 8K image.
 - **`StretchDIBits`' return is still swallowed** in `render` (M4's comment
@@ -891,8 +888,24 @@ M10 dd77603  this measurement, closed out in §9
 
 ### 13.10 Future capability gaps
 
-A zoom slider; a cursor that shows the drag; the anchor under the pointer;
-fit-to-window; double buffering if the flash is ever judged worth its
+A zoom slider; continuous fitting during window resizing; double buffering if the flash is ever judged worth its
 memory; frame-by-frame animation; and — when Phase 8 says so — a second
 backend implementing this same boundary for another platform. Phase 7 media
-work is out of scope here (§10) and has not been started.
+work remains outside this viewer's scope (§10).
+
+### 13.11 Selective interaction improvements (2026-10-16)
+
+Selected from `experimental-dev` (`0fe9c88`), without its archive/media
+progress code or unused indicatif vendor tree:
+
+- Open and browse fit the whole image, with no upscaling; browsing measures
+  the client area after changing the window size.
+- Wheel zoom anchors to the pointer. Dragging shows the system hand cursor.
+- `F` fits to the current window, `1` restores 100%, and `Esc` closes.
+  Previous/next and the system's Alt+F4 behavior remain available.
+- Fit scale is independent of the fixed wheel ladder, including below 25%.
+  Wheel zoom can return to a fit below the smallest fixed rung.
+
+The change adds no dependencies or sidecar assets. Automated logic and native
+compilation checks do not establish visual or interactive acceptance; manual
+GUI/VM validation remains deferred by the maintainer.

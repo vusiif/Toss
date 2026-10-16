@@ -7,25 +7,28 @@
 
 use std::mem::size_of;
 
-use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BeginPaint, COLOR_WINDOW, DIB_RGB_COLORS, EndPaint,
-    GetSysColorBrush, HALFTONE, HDC, InvalidateRect, PAINTSTRUCT, RGBQUAD, SRCCOPY, SetBrushOrgEx,
-    SetStretchBltMode, StretchDIBits, UpdateWindow,
+    GetSysColorBrush, HALFTONE, HDC, InvalidateRect, PAINTSTRUCT, RGBQUAD, SRCCOPY, ScreenToClient,
+    SetBrushOrgEx, SetStretchBltMode, StretchDIBits, UpdateWindow,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
 };
-use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture, VK_LEFT, VK_RIGHT};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    ReleaseCapture, SetCapture, VK_ESCAPE, VK_LEFT, VK_RIGHT,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     AdjustWindowRectEx, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW,
-    DispatchMessageW, GWLP_USERDATA, GetClientRect, GetMessageW, GetSystemMetrics,
-    GetWindowLongPtrW, IDC_ARROW, LoadCursorW, MSG, PostQuitMessage, RegisterClassExW, SM_CXSCREEN,
-    SM_CYSCREEN, SW_SHOW, SWP_NOMOVE, SWP_NOZORDER, SetForegroundWindow, SetWindowLongPtrW,
-    SetWindowPos, SetWindowTextW, ShowWindow, TranslateMessage, WM_CAPTURECHANGED, WM_DESTROY,
-    WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCDESTROY, WM_PAINT,
-    WNDCLASS_STYLES, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
+    DestroyWindow, DispatchMessageW, GWLP_USERDATA, GetClientRect, GetMessageW, GetSystemMetrics,
+    GetWindowLongPtrW, IDC_ARROW, IDC_HAND, LoadCursorW, MSG, PostQuitMessage, RegisterClassExW,
+    SM_CXSCREEN, SM_CYSCREEN, SW_SHOW, SWP_NOMOVE, SWP_NOZORDER, SetCursor, SetForegroundWindow,
+    SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow, TranslateMessage,
+    WM_CAPTURECHANGED, WM_DESTROY, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+    WM_MOUSEWHEEL, WM_NCDESTROY, WM_PAINT, WM_SETCURSOR, WNDCLASS_STYLES, WNDCLASSEXW,
+    WS_OVERLAPPEDWINDOW,
 };
 use windows::core::{HSTRING, PCWSTR, w};
 
@@ -44,8 +47,8 @@ const CLASS_NAME: PCWSTR = w!("TossImageViewer");
 /// which is what makes the three ways a window can end — creation refused,
 /// the loop failing, the window closing — all reduce to "one box, one drop".
 ///
-/// `zoom` is the *cursor* into the ladder Toss defines (`platform::image`);
-/// the ladder itself is a rule and does not live here. `origin` is the cursor
+/// `zoom` is the scale selected from the wheel ladder or fit-to-window rule
+/// (`platform::image`). `origin` is the cursor
 /// into the legal range Toss defines for panning; the range itself is a rule
 /// and does not live here either. That is the split `IMAGE_VIEWER.md` §4
 /// draws: the wheel and the mouse belong to this half, the levels and the
@@ -57,7 +60,7 @@ struct ViewerState {
     /// (`handlers::image`); what lives here is only the cursor into them,
     /// moved by the arrow keys through `nav`'s rule.
     request: ViewRequest,
-    zoom: usize,
+    zoom: f64,
     /// Where the picture's top-left corner sits in client coordinates.
     /// Zero at start and whenever the picture fits; the range it is allowed
     /// to reach is `pan::clamp`'s answer, not this struct's guess.
@@ -104,10 +107,10 @@ pub fn run(request: &ViewRequest, image: Decoded) -> Result<(), TossError> {
     // The single allocation this viewer makes for its own bookkeeping. It
     // lives on this stack frame for the whole message loop, so every address
     // the window is later handed stays valid until nothing can read it.
-    let state = Box::new(ViewerState {
+    let mut state = Box::new(ViewerState {
         image,
         request: request.clone(),
-        zoom: zoom::START,
+        zoom: 1.0,
         origin: (0, 0),
         drag: None,
     });
@@ -133,6 +136,9 @@ pub fn run(request: &ViewRequest, image: Decoded) -> Result<(), TossError> {
         )
     }
     .map_err(|err| super::failed("open a window", err))?;
+
+    // Fit against the actual client area, including images needing <25%.
+    state.zoom = zoom::fit_factor((state.image.width, state.image.height), client_size(window));
 
     // The window is told where the state lives *after* it exists, rather than
     // through creation data and `WM_NCCREATE`, because nothing that reads the
@@ -427,25 +433,28 @@ unsafe extern "system" fn window_proc(
                 // unsigned, and a scroll down becomes a scroll up.
                 let wheel = (wparam.0 >> 16) as u16 as i16;
 
-                let next = if wheel > 0 {
-                    zoom::step_up(state.zoom)
-                } else if wheel < 0 {
-                    zoom::step_down(state.zoom)
+                let fit =
+                    zoom::fit_factor((state.image.width, state.image.height), client_size(window));
+                let next = if wheel != 0 {
+                    zoom::wheel_factor(state.zoom, wheel > 0, fit)
                 } else {
                     state.zoom
                 };
 
                 if next != state.zoom {
+                    let old_factor = state.zoom;
+                    let new_factor = next;
                     state.zoom = next;
+                    // A wheel event ends any drag measured at the old scale.
+                    state.drag = None;
 
-                    // The ladder moved, so the range the origin was clamped
-                    // into moved with it: shrinking can leave the picture
-                    // smaller than the position it was dragged to, and the
-                    // edge the window would then show is background. Read it
-                    // back against the size it has *now*, before anything
-                    // paints.
-                    let content = drawn_size(&state.image, zoom::factor(state.zoom));
-                    state.origin = pan::clamp(state.origin, content, client_size(window));
+                    // Keep the logical image pixel directly underneath the cursor
+                    // stationary across zoom changes (§13.9 of IMAGE_VIEWER.md).
+                    let cursor = client_point_of(window, lparam);
+                    let target_origin =
+                        zoom::anchor_origin(state.origin, cursor, old_factor, new_factor);
+                    let content = drawn_size(&state.image, new_factor);
+                    state.origin = pan::clamp(target_origin, content, client_size(window));
 
                     // SAFETY: the window is live; a null rectangle means the
                     // whole client area, which is exactly what a zoom
@@ -455,6 +464,19 @@ unsafe extern "system" fn window_proc(
                 }
 
                 LRESULT(0)
+            }
+
+            WM_SETCURSOR if slot != 0 => {
+                let state = &*(slot as *const ViewerState);
+                if state.drag.is_some() {
+                    // IDC_HAND is a shared system cursor handle (§13.9 of IMAGE_VIEWER.md).
+                    if let Ok(hand) = LoadCursorW(None, IDC_HAND) {
+                        SetCursor(Some(hand));
+                        return LRESULT(1);
+                    }
+                }
+
+                DefWindowProcW(window, message, wparam, lparam)
             }
 
             WM_LBUTTONDOWN if slot != 0 => {
@@ -467,6 +489,11 @@ unsafe extern "system" fn window_proc(
                     at: point_of(lparam),
                     origin: state.origin,
                 });
+
+                // Switch cursor immediately to hand upon drag start.
+                if let Ok(hand) = LoadCursorW(None, IDC_HAND) {
+                    SetCursor(Some(hand));
+                }
 
                 // The mouse is captured so the moves — and the release —
                 // keep arriving even when the cursor leaves the window. That
@@ -493,7 +520,7 @@ unsafe extern "system" fn window_proc(
 
                 let cursor = point_of(lparam);
                 let delta = (cursor.0 - drag.at.0, cursor.1 - drag.at.1);
-                let content = drawn_size(&state.image, zoom::factor(state.zoom));
+                let content = drawn_size(&state.image, state.zoom);
                 let next = pan::dragged(drag.origin, delta, content, client_size(window));
 
                 if next != state.origin {
@@ -524,6 +551,11 @@ unsafe extern "system" fn window_proc(
                 let state = &mut *(slot as *mut ViewerState);
                 state.drag = None;
 
+                // Restore arrow cursor when dragging ends.
+                if let Ok(arrow) = LoadCursorW(None, IDC_ARROW) {
+                    SetCursor(Some(arrow));
+                }
+
                 // SAFETY: this releases whatever the calling thread has
                 // captured — the same thread the `SetCapture` above runs
                 // on — and releasing a mouse nobody holds is a documented
@@ -542,24 +574,36 @@ unsafe extern "system" fn window_proc(
                 let state = &mut *(slot as *mut ViewerState);
                 state.drag = None;
 
+                // Restore arrow cursor when capture is lost.
+                if let Ok(arrow) = LoadCursorW(None, IDC_ARROW) {
+                    SetCursor(Some(arrow));
+                }
+
                 LRESULT(0)
             }
 
             WM_KEYDOWN if slot != 0 => {
                 let state = &mut *(slot as *mut ViewerState);
 
-                // Only the two arrows are Toss's — §18.3 asks for
-                // previous/next and nothing more — and every other key keeps
-                // the system's handling, because a viewer that swallows the
-                // keys it does not understand breaks whatever feature needs
-                // them next.
-                let forward = match u16::try_from(wparam.0) {
-                    Ok(key) if key == VK_RIGHT.0 => true,
-                    Ok(key) if key == VK_LEFT.0 => false,
+                // Supported shortcuts:
+                // Left/Right: previous/next image
+                // Esc: close viewer
+                // F: fit-to-window
+                // 1: actual size (100%)
+                match u16::try_from(wparam.0) {
+                    Ok(key) if key == VK_RIGHT.0 => browse(state, window, true),
+                    Ok(key) if key == VK_LEFT.0 => browse(state, window, false),
+                    Ok(key) if key == VK_ESCAPE.0 => {
+                        let _ = DestroyWindow(window);
+                    }
+                    Ok(key) if key == b'F' as u16 => {
+                        fit_to_window(state, window);
+                    }
+                    Ok(key) if key == b'1' as u16 => {
+                        actual_size(state, window);
+                    }
                     _ => return DefWindowProcW(window, message, wparam, lparam),
-                };
-
-                browse(state, window, forward);
+                }
 
                 LRESULT(0)
             }
@@ -574,6 +618,31 @@ unsafe extern "system" fn window_proc(
             // the `WM_DESTROY` handled above. Repeating that chain by hand
             // would be the same rule written twice.
             _ => DefWindowProcW(window, message, wparam, lparam),
+        }
+    }
+}
+
+/// Fit the whole image to the current client area.
+fn fit_to_window(state: &mut ViewerState, window: HWND) {
+    let client = client_size(window);
+    state.zoom = zoom::fit_factor((state.image.width, state.image.height), client);
+    state.origin = (0, 0);
+    state.drag = None;
+    // SAFETY: live window
+    unsafe {
+        let _ = InvalidateRect(Some(window), None, true);
+    }
+}
+
+/// Reset zoom to 100% (actual size) at the top-left origin.
+fn actual_size(state: &mut ViewerState, window: HWND) {
+    if state.zoom != 1.0 || state.origin != (0, 0) || state.drag.is_some() {
+        state.zoom = 1.0;
+        state.origin = (0, 0);
+        state.drag = None;
+        // SAFETY: live window
+        unsafe {
+            let _ = InvalidateRect(Some(window), None, true);
         }
     }
 }
@@ -620,7 +689,7 @@ fn browse(state: &mut ViewerState, window: HWND, forward: bool) {
 
     state.request.index = index;
     state.image = image;
-    state.zoom = zoom::START;
+    state.zoom = 1.0;
     state.origin = (0, 0);
     state.drag = None;
 
@@ -640,6 +709,10 @@ fn browse(state: &mut ViewerState, window: HWND, forward: bool) {
             let _ = SetWindowPos(window, None, 0, 0, width, height, SWP_NOMOVE | SWP_NOZORDER);
         }
     }
+
+    // Resizing above changes the viewport: never fit to the previous image's
+    // window dimensions.
+    state.zoom = zoom::fit_factor((state.image.width, state.image.height), client_size(window));
 
     // The title names what the window is showing, so it has to follow the
     // picture instead of the one it opened on.
@@ -678,7 +751,7 @@ fn browse(state: &mut ViewerState, window: HWND, forward: bool) {
 fn render(state: &ViewerState, dc: HDC) {
     let image = &state.image;
     let source = (image.width as i32, image.height as i32);
-    let destination = drawn_size(image, zoom::factor(state.zoom));
+    let destination = drawn_size(image, state.zoom);
     let info = bitmap_info(image);
 
     // Scale by averaging — but only when shrinking.
@@ -747,6 +820,22 @@ fn point_of(lparam: LPARAM) -> (i32, i32) {
         lparam.0 as u16 as i16 as i32,
         (lparam.0 >> 16) as u16 as i16 as i32,
     )
+}
+
+/// Convert screen coordinates in `lparam` (e.g. from `WM_MOUSEWHEEL`) into
+/// client coordinates for the given window.
+fn client_point_of(window: HWND, lparam: LPARAM) -> (i32, i32) {
+    let mut pt = POINT {
+        x: lparam.0 as u16 as i16 as i32,
+        y: (lparam.0 >> 16) as u16 as i16 as i32,
+    };
+
+    // SAFETY: `pt` is valid stack storage and `window` is the live window.
+    unsafe {
+        let _ = ScreenToClient(window, &mut pt);
+    }
+
+    (pt.x, pt.y)
 }
 
 /// The window's client size, in pixels, as the picture's legal range needs
@@ -826,7 +915,7 @@ mod tests {
 
     use super::super::decode::{Decoded, decode};
     use super::{bitmap_info, drawn_size, outer_size, point_of, within_half_screen};
-    use crate::platform::image::{pan, zoom};
+    use crate::platform::image::pan;
 
     fn sample(name: &str) -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -944,7 +1033,7 @@ mod tests {
         // At the default level of the larger sample: 320x200 of picture in a
         // 40x30 window, so 280x170 of travel.
         let image = decode(&sample("panel.png")).expect("the sample decodes");
-        let content = drawn_size(&image, zoom::factor(zoom::START));
+        let content = drawn_size(&image, 1.0);
         let viewport = (40, 30);
 
         assert_eq!(content, (320, 200), "the sample's own size at 1:1");

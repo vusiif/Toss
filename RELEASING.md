@@ -21,9 +21,11 @@ so local `.sandbox-test/`, unrelated untracked sources, caches and diagnostics
 cannot enter the source package. Build with the existing locked offline
 all-features recipe and verify the assembled local package at Full level.
 
-Public assets are a Windows x64 binary ZIP (executable, licenses, notices and
-build information), matching first-party/vendored source ZIP, locked crate
-source ZIP, source manifest and SHA256SUMS. The local-draft builder's
+The primary public asset is the standalone Windows x64 `toss.exe`; it needs
+no adjacent DLLs, resource files or configuration directory. An optional
+Windows x64 ZIP includes the same executable, licenses, notices and build
+information. Also publish matching first-party/vendored source ZIP, locked
+crate source ZIP, source manifest and SHA256SUMS. The local-draft builder's
 LOCAL-DRAFT.md and local-only status record are preparation evidence rather
 than the public release wrapper. Record the actual source commit, build
 command, executable hash and known limitations in the public build information
@@ -31,6 +33,35 @@ and release notes. Publish assets and source together under the same tag.
 
 README remains unchanged during preparation; its update is deferred until
 after the first release as requested by the maintainer.
+
+### v0.1.1 performance baseline decision (2026-10-16)
+
+The maintainer selected v0.1.1 as the baseline for future executable-size and
+runtime-efficiency comparisons. This patch selects the explicit `info` action
+and image interactions from `experimental-dev`, including corrected image
+fitting. Archive/media progress and unused indicatif sources are excluded.
+Dependencies and the single-executable distribution model are unchanged.
+
+Use the published v0.1.1 `toss.exe` and its release SHA256SUMS as the canonical
+baseline, and keep a byte-identical local copy at `dist/v0.1.1/toss.exe`.
+Future versions belong in separate `dist/<version>/` folders. Do not overwrite
+older baselines. Local dist files are excluded locally, not source inputs.
+
+Compare full `cargo build --release --locked --offline --all-features`
+artifacts with the same toolchain and static-CRT configuration. Record exact
+bytes, toolchain, SHA-256, workload, environment, sample count and dispersion.
+Separate warm-cache CLI startup from cold startup, image opening, archive
+throughput, media CPU usage and peak memory. A previous preview measured only
+CLI wall time: 3 warmups, 40 samples per binary/workload, alternating order,
+redirected output. Its timing ranges overlapped; no startup performance change
+was established. Do not promote those preview timings into measurements of a
+different release executable without measuring it.
+
+This patch's scoped image/info checks passed 127 tests and strict Clippy on
+the host with explicit maintainer authorization; this was not isolated testing.
+GUI/VM interaction acceptance remains deferred. Manual window resizing needs
+`F` to fit again. Release notes retain these limitations and the existing
+archive/media caveats; unperformed tests are never recorded as passed.
 
 ```text
 scripts/New-ReleasePackage.ps1    create a local-draft package

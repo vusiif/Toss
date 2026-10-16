@@ -88,50 +88,68 @@ fn ensure_openable(request: &ViewRequest) -> Result<(), TossError> {
 pub mod zoom {
     /// The levels, as multiples of the image's own size.
     ///
-    /// Five rather than a continuous range: §18.3 asks for zoom, not for a
-    /// magnifier, and a stepped ladder is the smallest thing that satisfies it
-    /// while keeping the rule testable and the state a single index.
+    /// Wheel zoom uses five fixed rungs. Fit-to-window may use a smaller or
+    /// intermediate scale so the whole image remains visible.
     pub const STEPS: [f64; 5] = [0.25, 0.5, 1.0, 2.0, 4.0];
 
-    /// The level a viewer opens on: one to one.
-    ///
-    /// 100% is the only starting level that cannot be wrong for an image whose
-    /// real size Toss has not been asked to second-guess — and fit-to-window
-    /// is a question about the window, which is §11's "not yet".
-    pub const START: usize = 2;
-
-    /// The factor at `step`.
-    ///
-    /// An index with no level falls back to the starting one instead of
-    /// panicking. The index is nudged by a scroll wheel, and §23 does not
-    /// allow a wheel — or an index arithmetic bug — to take Toss down.
+    /// Compute the new origin that keeps `cursor` over the same logical pixel of
+    /// the image across a zoom factor change (§13.9 of IMAGE_VIEWER.md).
     #[must_use]
-    pub fn factor(step: usize) -> f64 {
-        STEPS.get(step).copied().unwrap_or(STEPS[START])
+    pub fn anchor_origin(
+        origin: (i32, i32),
+        cursor: (i32, i32),
+        old_factor: f64,
+        new_factor: f64,
+    ) -> (i32, i32) {
+        if old_factor <= 0.0 {
+            return origin;
+        }
+        let ratio = new_factor / old_factor;
+        let new_x = cursor.0 as f64 - (cursor.0 as f64 - origin.0 as f64) * ratio;
+        let new_y = cursor.1 as f64 - (cursor.1 as f64 - origin.1 as f64) * ratio;
+        (new_x.round() as i32, new_y.round() as i32)
     }
 
-    /// One level closer to the pixels, stopping at the largest.
+    /// Fit the whole image without enlarging smaller pictures. The fit factor
+    /// is independent of the wheel ladder so even very large images fit.
     #[must_use]
-    pub fn step_up(step: usize) -> usize {
-        step.saturating_add(1).min(STEPS.len() - 1)
+    pub fn fit_factor(image_size: (u32, u32), client_size: (i32, i32)) -> f64 {
+        if image_size.0 == 0 || image_size.1 == 0 || client_size.0 <= 0 || client_size.1 <= 0 {
+            return 1.0;
+        }
+
+        let scale_x = client_size.0 as f64 / image_size.0 as f64;
+        let scale_y = client_size.1 as f64 / image_size.1 as f64;
+        scale_x.min(scale_y).min(1.0)
     }
 
-    /// One level further from the pixels, stopping at the smallest.
-    ///
-    /// Stopping rather than wrapping: running off the end of a zoom ladder
-    /// into the opposite direction is a different rule from previous/next,
-    /// which does wrap (`IMAGE_VIEWER.md` §5).
+    /// Move to the next wheel rung, including the fit factor below 25%.
     #[must_use]
-    pub fn step_down(step: usize) -> usize {
-        step.saturating_sub(1)
+    pub fn wheel_factor(current: f64, forward: bool, fit: f64) -> f64 {
+        let minimum = fit.min(STEPS[0]);
+        if forward {
+            STEPS
+                .iter()
+                .copied()
+                .find(|&step| step > current)
+                .unwrap_or(current)
+        } else {
+            STEPS
+                .iter()
+                .rev()
+                .copied()
+                .find(|&step| step < current)
+                .unwrap_or(minimum)
+                .min(current)
+        }
     }
 
     #[cfg(test)]
     mod tests {
-        use super::{START, STEPS, factor, step_down, step_up};
+        use super::{STEPS, anchor_origin, fit_factor, wheel_factor};
 
         #[test]
-        fn the_ladder_is_ordered_and_starts_one_to_one() {
+        fn the_ladder_is_ordered_and_includes_actual_size() {
             for pair in STEPS.windows(2) {
                 assert!(
                     pair[0] < pair[1],
@@ -139,50 +157,67 @@ pub mod zoom {
                 );
             }
 
-            assert!(
-                STEPS[START].eq(&1.0),
-                "a viewer must open at the image's own size"
-            );
+            assert!(STEPS.contains(&1.0));
         }
 
         #[test]
         fn stepping_up_stops_at_the_largest_level() {
-            let mut step = START;
+            let mut scale = 1.0;
             for _ in 0..10 {
-                step = step_up(step);
+                scale = wheel_factor(scale, true, 1.0);
             }
-
-            assert_eq!(step, STEPS.len() - 1, "it ran off the top");
-            assert_eq!(factor(step), *STEPS.last().expect("not empty"));
+            assert_eq!(scale, *STEPS.last().expect("not empty"));
         }
 
         #[test]
         fn stepping_down_stops_at_the_smallest_level() {
-            let mut step = START;
+            let mut scale = 1.0;
             for _ in 0..10 {
-                step = step_down(step);
+                scale = wheel_factor(scale, false, 1.0);
             }
-
-            assert_eq!(step, 0, "it ran off the bottom");
-            assert_eq!(factor(step), STEPS[0]);
+            assert_eq!(scale, STEPS[0]);
         }
 
         #[test]
-        fn neither_end_of_the_ladder_wraps() {
-            // The difference from previous/next, which does wrap: zooming past
-            // the end has to stop, or the smallest level would become the
-            // largest and the user would have no idea where they were.
-            assert_eq!(step_down(step_down(0)), 0);
-            assert_eq!(step_up(step_up(STEPS.len() - 1)), STEPS.len() - 1);
+        fn anchor_origin_preserves_pixel_under_cursor() {
+            // Zooming in at origin (0, 0) with cursor at (0, 0) stays at (0, 0)
+            assert_eq!(anchor_origin((0, 0), (0, 0), 1.0, 2.0), (0, 0));
+
+            // Zooming in 1.0 -> 2.0 with cursor at (100, 100) shifts origin to (-100, -100)
+            assert_eq!(anchor_origin((0, 0), (100, 100), 1.0, 2.0), (-100, -100));
+
+            // Zooming back out 2.0 -> 1.0 restores origin to (0, 0)
+            assert_eq!(anchor_origin((-100, -100), (100, 100), 2.0, 1.0), (0, 0));
         }
 
         #[test]
-        fn an_index_with_no_level_is_not_a_panic() {
-            // The index is what a scroll wheel moves; nothing here may unwind.
-            assert_eq!(factor(START + 99), STEPS[START]);
-            assert_eq!(factor(usize::MAX), STEPS[START]);
-            assert_eq!(step_up(usize::MAX), STEPS.len() - 1);
-            assert_eq!(step_down(0), 0);
+        fn fit_factor_shows_the_entire_image_without_upscaling() {
+            for (image, client) in [
+                ((320, 200), (640, 480)),
+                ((1280, 720), (640, 480)),
+                ((8000, 6000), (640, 480)),
+                ((12000, 1000), (301, 199)),
+            ] {
+                let fit = fit_factor(image, client);
+                assert!(fit > 0.0 && fit <= 1.0);
+                assert!(image.0 as f64 * fit <= client.0 as f64 + 1e-9);
+                assert!(image.1 as f64 * fit <= client.1 as f64 + 1e-9);
+            }
+            assert_eq!(fit_factor((320, 200), (640, 480)), 1.0);
+            assert_eq!(fit_factor((8000, 6000), (640, 480)), 0.08);
+            assert_eq!(fit_factor((0, 100), (640, 480)), 1.0);
+            assert_eq!(fit_factor((100, 100), (0, 0)), 1.0);
+        }
+
+        #[test]
+        fn wheel_steps_from_arbitrary_fit_and_returns_to_small_fit() {
+            assert_eq!(wheel_factor(0.08, true, 0.08), 0.25);
+            assert_eq!(wheel_factor(0.25, false, 0.08), 0.08);
+            assert_eq!(wheel_factor(0.08, false, 0.08), 0.08);
+            assert_eq!(wheel_factor(0.6, true, 0.6), 1.0);
+            assert_eq!(wheel_factor(0.6, false, 0.6), 0.5);
+            assert_eq!(wheel_factor(4.0, true, 0.08), 4.0);
+            assert_eq!(wheel_factor(0.25, false, 1.0), 0.25);
         }
     }
 }
