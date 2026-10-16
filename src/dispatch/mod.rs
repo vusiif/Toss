@@ -98,6 +98,13 @@ fn route(verb: Option<Verb>, input: &Input, kind: Kind) -> Result<(), TossError>
             _ => Err(TossError::UnsupportedFormat(input.path().to_path_buf())),
         },
 
+        // `toss info file.ext` — inspect a file using metadata facts without
+        // launching GUI or extracting, fulfilling `--help`'s promise.
+        Some(Verb::Info) => {
+            log::out(&info::gather(input.path()).render(kind.label()));
+            Ok(())
+        }
+
         // The remaining verbs have no handler yet, so naming one is still
         // the most useful reply (§4.2).
         Some(verb) => Err(TossError::not_implemented(verb.as_str())),
@@ -236,6 +243,15 @@ mod tests {
         });
 
         assert!(err.is_ok(), "an unknown file must not fail: {err:?}");
+    }
+
+    #[test]
+    fn the_info_verb_inspects_any_file_successfully() {
+        let res = run(Command::Explicit {
+            verb: Verb::Info,
+            args: vec![manifest("Cargo.toml")],
+        });
+        assert!(res.is_ok(), "toss info must succeed on any valid file");
     }
 
     #[test]

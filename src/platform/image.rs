@@ -126,9 +126,55 @@ pub mod zoom {
         step.saturating_sub(1)
     }
 
+    /// Compute the new origin that keeps `cursor` over the same logical pixel of
+    /// the image across a zoom factor change (§13.9 of IMAGE_VIEWER.md).
+    #[must_use]
+    pub fn anchor_origin(
+        origin: (i32, i32),
+        cursor: (i32, i32),
+        old_factor: f64,
+        new_factor: f64,
+    ) -> (i32, i32) {
+        if old_factor <= 0.0 {
+            return origin;
+        }
+        let ratio = new_factor / old_factor;
+        let new_x = cursor.0 as f64 - (cursor.0 - origin.0) as f64 * ratio;
+        let new_y = cursor.1 as f64 - (cursor.1 - origin.1) as f64 * ratio;
+        (new_x.round() as i32, new_y.round() as i32)
+    }
+
+    /// Find the highest ladder rung that fits `image_size` inside `client_size`,
+    /// bounded above by `START` (100%).
+    ///
+    /// If the image already fits within the window at 1:1, `START` is returned
+    /// so Toss does not needlessly enlarge pictures.
+    #[must_use]
+    pub fn fit_step(image_size: (u32, u32), client_size: (i32, i32)) -> usize {
+        if image_size.0 == 0 || image_size.1 == 0 || client_size.0 <= 0 || client_size.1 <= 0 {
+            return START;
+        }
+
+        let scale_x = client_size.0 as f64 / image_size.0 as f64;
+        let scale_y = client_size.1 as f64 / image_size.1 as f64;
+        let fit_scale = scale_x.min(scale_y);
+
+        if fit_scale >= STEPS[START] {
+            return START;
+        }
+
+        let mut best = 0;
+        for (i, &step_scale) in STEPS.iter().enumerate().take(START + 1) {
+            if step_scale <= fit_scale {
+                best = i;
+            }
+        }
+        best
+    }
+
     #[cfg(test)]
     mod tests {
-        use super::{START, STEPS, factor, step_down, step_up};
+        use super::{START, STEPS, anchor_origin, factor, fit_step, step_down, step_up};
 
         #[test]
         fn the_ladder_is_ordered_and_starts_one_to_one() {
@@ -183,6 +229,37 @@ pub mod zoom {
             assert_eq!(factor(usize::MAX), STEPS[START]);
             assert_eq!(step_up(usize::MAX), STEPS.len() - 1);
             assert_eq!(step_down(0), 0);
+        }
+
+        #[test]
+        fn anchor_origin_preserves_pixel_under_cursor() {
+            // Zooming in at origin (0, 0) with cursor at (0, 0) stays at (0, 0)
+            assert_eq!(anchor_origin((0, 0), (0, 0), 1.0, 2.0), (0, 0));
+
+            // Zooming in 1.0 -> 2.0 with cursor at (100, 100) shifts origin to (-100, -100)
+            assert_eq!(anchor_origin((0, 0), (100, 100), 1.0, 2.0), (-100, -100));
+
+            // Zooming back out 2.0 -> 1.0 restores origin to (0, 0)
+            assert_eq!(anchor_origin((-100, -100), (100, 100), 2.0, 1.0), (0, 0));
+        }
+
+        #[test]
+        fn fit_step_chooses_best_fitting_rung() {
+            // Smaller than client: stays at 1:1 (START = 2)
+            assert_eq!(fit_step((320, 200), (640, 480)), START);
+
+            // Double size: 0.5 (step 1) fits
+            assert_eq!(fit_step((1280, 720), (640, 480)), 1);
+
+            // Quadruple size: 0.25 (step 0) fits
+            assert_eq!(fit_step((2560, 1440), (640, 480)), 0);
+
+            // Extremely large: bounded at step 0
+            assert_eq!(fit_step((8000, 6000), (640, 480)), 0);
+
+            // Zero sizes or zero client don't panic, return START
+            assert_eq!(fit_step((0, 100), (640, 480)), START);
+            assert_eq!(fit_step((100, 100), (0, 0)), START);
         }
     }
 }

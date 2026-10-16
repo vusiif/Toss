@@ -142,10 +142,22 @@ impl Writer {
     /// Children are sorted, so the same directory produces the same archive
     /// byte for byte — otherwise every run would differ by directory order
     /// alone and no diff of two outputs could be trusted.
-    pub fn add_tree(&self, source: &Path) -> Result<(u64, u64), ArchiveError> {
+    pub fn add_tree(
+        &self,
+        source: &Path,
+        progress: Option<&std::sync::Arc<dyn crate::backend::archive::types::ProgressListener>>,
+    ) -> Result<(u64, u64), ArchiveError> {
         let mut written = 0_u64;
         let mut skipped = 0_u64;
-        self.walk(source, source, &mut written, &mut skipped)?;
+        let mut bytes = 0_u64;
+        self.walk(
+            source,
+            source,
+            &mut written,
+            &mut skipped,
+            &mut bytes,
+            progress,
+        )?;
         Ok((written, skipped))
     }
 
@@ -155,6 +167,8 @@ impl Writer {
         directory: &Path,
         written: &mut u64,
         skipped: &mut u64,
+        bytes: &mut u64,
+        progress: Option<&std::sync::Arc<dyn crate::backend::archive::types::ProgressListener>>,
     ) -> Result<(), ArchiveError> {
         let read = std::fs::read_dir(directory).map_err(|err| io_failure(directory, &err))?;
 
@@ -187,14 +201,22 @@ impl Writer {
 
             if metadata.is_dir() {
                 self.add_directory(relative, modified)?;
-                self.walk(root, &path, written, skipped)?;
                 *written += 1;
+                if let Some(p) = progress {
+                    p.on_progress(*written, *bytes, relative);
+                }
+                self.walk(root, &path, written, skipped, bytes, progress)?;
                 continue;
             }
 
             let mut stream = std::fs::File::open(&path).map_err(|err| io_failure(&path, &err))?;
-            self.add_file(relative, &mut stream, metadata.len(), modified)?;
+            let file_len = metadata.len();
+            self.add_file(relative, &mut stream, file_len, modified)?;
             *written += 1;
+            *bytes += file_len;
+            if let Some(p) = progress {
+                p.on_progress(*written, *bytes, relative);
+            }
         }
 
         Ok(())

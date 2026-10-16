@@ -61,7 +61,7 @@ impl ArchiveBackend for LibarchiveBackend {
         // to be streamed into this writer as they are discovered, and splitting
         // discovery from writing would mean passing an open file list through
         // the domain types for no gain while there is one backend (§46, §42).
-        let (entries, skipped) = writer.add_tree(&request.source)?;
+        let (entries, skipped) = writer.add_tree(&request.source, request.progress.as_ref())?;
 
         writer.finish()?;
 

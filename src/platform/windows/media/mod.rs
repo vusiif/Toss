@@ -6,6 +6,7 @@
 //! behind the wrapper, and every `unsafe` of the phase lives there).
 
 mod backend;
+mod dashboard;
 mod player;
 
 use std::path::Path;
@@ -103,5 +104,136 @@ fn from_hresult(path: &Path, step: &str, code: HRESULT) -> TossError {
     TossError::CorruptInput {
         path: path.to_path_buf(),
         context: format!("{step}: {code:?}"),
+    }
+}
+
+/// The console companion for media playback (§4 of `MEDIA_PLAYBACK.md`).
+///
+/// Follows the same format as the image viewer's companion (§12 of
+/// `IMAGE_VIEWER.md`): reports file, format, duration, and the implemented
+/// controls for video.
+pub(super) fn summary(path: &Path, duration_100ns: u64, has_video: bool) -> String {
+    let mut text = String::new();
+    text.push_str("Toss — Media\n\n");
+
+    let mut field = |label: &str, value: String| {
+        text.push_str(&format!("{label:<12}{value}\n"));
+    };
+
+    let file_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string());
+
+    field("File", file_name);
+    field("Format", format_name(path).to_owned());
+    field("Duration", format_duration(duration_100ns));
+
+    text.push_str("\nPlaying\n");
+
+    if has_video {
+        text.push_str("\nControls\n");
+        for (key, action) in [
+            ("Space", "Play / pause"),
+            ("Left/Right", "Seek"),
+            ("Up/Down", "Volume"),
+            ("F", "Fullscreen"),
+            ("Esc", "Stop and close"),
+        ] {
+            text.push_str(&format!("  {key:<12}{action}\n"));
+        }
+    }
+
+    text
+}
+
+/// Format duration given in 100-nanosecond units (`MF_PD_DURATION`) as MM:SS
+/// or HH:MM:SS.
+pub(super) fn format_duration(duration_100ns: u64) -> String {
+    if duration_100ns == u64::MAX {
+        return "unknown".to_owned();
+    }
+    let total_seconds = duration_100ns / 10_000_000;
+    let hours = total_seconds / 3600;
+    let minutes = (total_seconds % 3600) / 60;
+    let seconds = total_seconds % 60;
+    if hours > 0 {
+        format!("{hours:02}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes:02}:{seconds:02}")
+    }
+}
+
+/// The display name for the extension that identified this file as media.
+pub(super) fn format_name(path: &Path) -> &'static str {
+    let Some(extension) = path.extension() else {
+        return "(none)";
+    };
+
+    match extension.to_string_lossy().to_ascii_lowercase().as_str() {
+        "mp4" => "MP4",
+        "mkv" => "MKV",
+        "webm" => "WebM",
+        "avi" => "AVI",
+        "mov" => "MOV",
+        "mp3" => "MP3",
+        "flac" => "FLAC",
+        "wav" => "WAV",
+        _ => "(none)",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::{format_duration, format_name, summary};
+
+    #[test]
+    fn format_duration_converts_100ns_units() {
+        assert_eq!(format_duration(u64::MAX), "unknown");
+        assert_eq!(format_duration(0), "00:00");
+        assert_eq!(format_duration(10_000_000), "00:01");
+        // 222 seconds = 3 min 42 sec (from MEDIA_PLAYBACK.md §4 sample)
+        assert_eq!(format_duration(222 * 10_000_000), "03:42");
+        // 3665 seconds = 1 hour 1 min 5 sec
+        assert_eq!(format_duration(3665 * 10_000_000), "01:01:05");
+    }
+
+    #[test]
+    fn format_name_recognises_media_extensions() {
+        assert_eq!(format_name(Path::new("song.mp3")), "MP3");
+        assert_eq!(format_name(Path::new("clip.MP4")), "MP4");
+        assert_eq!(format_name(Path::new("track.flac")), "FLAC");
+        assert_eq!(format_name(Path::new("movie.mkv")), "MKV");
+        assert_eq!(format_name(Path::new("video.webm")), "WebM");
+        assert_eq!(format_name(Path::new("retro.avi")), "AVI");
+        assert_eq!(format_name(Path::new("film.mov")), "MOV");
+        assert_eq!(format_name(Path::new("sound.wav")), "WAV");
+        assert_eq!(format_name(Path::new("unknown")), "(none)");
+        assert_eq!(format_name(Path::new("unknown.foo")), "(none)");
+    }
+
+    #[test]
+    fn media_summary_reports_expected_fields() {
+        let text = summary(Path::new("song.mp3"), 222 * 10_000_000, false);
+        assert!(text.contains("Toss — Media"), "{text}");
+        assert!(text.contains("song.mp3"), "{text}");
+        assert!(text.contains("MP3"), "{text}");
+        assert!(text.contains("03:42"), "{text}");
+        assert!(text.contains("Playing"), "{text}");
+        // Audio-only does not list window controls
+        assert!(!text.contains("Controls"), "{text}");
+
+        let video_text = summary(Path::new("movie.mp4"), 120 * 10_000_000, true);
+        assert!(video_text.contains("Toss — Media"), "{video_text}");
+        assert!(video_text.contains("movie.mp4"), "{video_text}");
+        assert!(video_text.contains("Controls"), "{video_text}");
+        for key in ["Space", "Left/Right", "Up/Down", "F", "Esc"] {
+            assert!(
+                video_text.contains(key),
+                "missing key {key:?} in video summary"
+            );
+        }
     }
 }

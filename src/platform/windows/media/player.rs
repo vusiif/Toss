@@ -82,6 +82,8 @@ struct PlayerState {
     /// same way the viewer carries a decode failure: the window procedure
     /// cannot return a `TossError`, so the state holds it until `run` can.
     error: Option<TossError>,
+    /// Live terminal companion displaying dynamic playback status.
+    dashboard: super::dashboard::MediaDashboard,
 }
 /// A window, created here and destroyed either by its own `WM_CLOSE` or, on
 /// an error path, by this value's `Drop`.
@@ -167,6 +169,7 @@ pub(super) fn run(
         paused: false,
         duration,
         saved_rect: (0, 0, 0, 0),
+        dashboard: super::dashboard::MediaDashboard::new(duration),
     });
     // SAFETY: `state` is a live box that outlives the loop below, and
     // `GWLP_USERDATA` is the slot Windows reserves for exactly this use.
@@ -252,6 +255,9 @@ unsafe extern "system" fn window_proc(
             WM_TIMER if slot != 0 => {
                 let state = &mut *(slot as *mut PlayerState);
                 pump(state, window);
+                state
+                    .dashboard
+                    .update(&state.session, &state.path, state.paused);
                 LRESULT(0)
             }
             // D2's controls, one match on the virtual-key code. Every
@@ -273,7 +279,14 @@ unsafe extern "system" fn window_proc(
                             super::backend::pause(&state.session, &state.path)
                         };
                         match outcome {
-                            Ok(()) => state.paused = !state.paused,
+                            Ok(()) => {
+                                state.paused = !state.paused;
+                                state.dashboard.force_update(
+                                    &state.session,
+                                    &state.path,
+                                    state.paused,
+                                );
+                            }
                             Err(err) => fail(state, window, err),
                         }
                     }
@@ -285,14 +298,22 @@ unsafe extern "system" fn window_proc(
                         let direction = if key == VK_RIGHT.0 { 1 } else { -1 };
                         let current = super::backend::current_time(&state.session, &state.path);
                         let outcome = current.and_then(|now| {
-                            super::backend::seek_to(
-                                &state.session,
-                                &state.path,
-                                (now + SEEK_STEP * direction).min(state.duration),
-                            )
+                            let target = now + SEEK_STEP * direction;
+                            if target >= state.duration {
+                                // Reached or exceeded duration: close cleanly rather than asking
+                                // MF for past-the-end frame (§9 of MEDIA_PLAYBACK.md).
+                                let _ = DestroyWindow(window);
+                                Ok(())
+                            } else {
+                                super::backend::seek_to(&state.session, &state.path, target.max(0))
+                            }
                         });
                         if let Err(err) = outcome {
                             fail(state, window, err);
+                        } else {
+                            state
+                                .dashboard
+                                .force_update(&state.session, &state.path, state.paused);
                         }
                     }
                     // Volume by a tenth of full scale, clamped in the
@@ -317,6 +338,9 @@ unsafe extern "system" fn window_proc(
                         // and the console companion will have a place to say
                         // so when it exists.
                         let _ = outcome;
+                        state
+                            .dashboard
+                            .force_update(&state.session, &state.path, state.paused);
                     }
                     // Fullscreen: cover the screen, or give back the exact
                     // Fullscreen is the renderer's own (MEDIA_PLAYBACK.md

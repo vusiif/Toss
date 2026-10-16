@@ -10,3 +10,4 @@ pub mod exit_code;
 pub mod info;
 pub mod input;
 pub mod log;
+pub mod progress;

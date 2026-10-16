@@ -325,6 +325,9 @@ impl Reader {
             }
 
             result.entries += 1;
+            if let Some(progress) = &request.progress {
+                progress.on_progress(result.entries, result.bytes_written, &info.path);
+            }
         }
 
         Ok(result)
@@ -787,10 +790,10 @@ mod tests {
     }
 
     fn request(archive: &str, output_root: &Path) -> ExtractRequest {
-        ExtractRequest {
-            input: ArchiveInput::single(corpus(archive)),
-            output_root: output_root.to_path_buf(),
-        }
+        ExtractRequest::new(
+            ArchiveInput::single(corpus(archive)),
+            output_root.to_path_buf(),
+        )
     }
 
     /// Build a stored (uncompressed) ZIP whose members are all empty.
@@ -948,10 +951,10 @@ mod tests {
         let archive_path = scratch.path().join("hostile.zip");
         std::fs::write(&archive_path, &hostile).expect("temp archive written");
 
-        let request = ExtractRequest {
-            input: ArchiveInput::single(archive_path),
-            output_root: scratch.path().join("root"),
-        };
+        let request = ExtractRequest::new(
+            ArchiveInput::single(archive_path),
+            scratch.path().join("root"),
+        );
         std::fs::create_dir_all(&request.output_root).expect("output root");
 
         let err = Reader::extract(&request).expect_err("the entry must be refused");
@@ -999,10 +1002,10 @@ mod tests {
         let output_root = case.join("out");
         std::fs::create_dir_all(&output_root).expect("output root");
 
-        Reader::extract(&ExtractRequest {
-            input: ArchiveInput::single(archive.to_path_buf()),
+        Reader::extract(&ExtractRequest::new(
+            ArchiveInput::single(archive.to_path_buf()),
             output_root,
-        })
+        ))
     }
 
     /// What landed beside `case/out` when nothing was supposed to.

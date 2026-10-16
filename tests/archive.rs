@@ -248,3 +248,122 @@ fn a_corrupt_archive_reports_six_rather_than_one() {
         "the failure must be a diagnostic on stderr"
     );
 }
+
+#[test]
+fn an_archive_with_unicode_and_spaces_in_its_own_path_extracts_correctly() {
+    let scratch = Scratch::new("unicode-archive-name");
+    let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("corpus")
+        .join("archive")
+        .join("valid")
+        .join("simple.zip");
+    let unicode_archive_name = "包含 空格 与 中文 😊.zip";
+    let destination = scratch.path().join(unicode_archive_name);
+    std::fs::copy(&source, &destination).expect("archive copied");
+
+    let output = toss(&[destination.as_path()]);
+    assert!(
+        output.status.success(),
+        "extraction failed: {}",
+        stderr(&output)
+    );
+
+    let output_dir = scratch.path().join("包含 空格 与 中文 😊");
+    assert!(
+        output_dir.is_dir(),
+        "expected output directory beside archive with matching unicode name"
+    );
+    assert!(
+        output_dir.join("tmp.class").is_file(),
+        "extracted member missing from unicode destination folder"
+    );
+}
+
+#[test]
+fn unicode_rar5_members_survive_end_to_end() {
+    let scratch = Scratch::new("unicode-rar5");
+    let archive = sample(scratch.path(), "unicode/unicode-rar5.rar");
+
+    let output = toss(&[archive.as_path()]);
+    assert!(
+        output.status.success(),
+        "RAR5 extraction failed: {}",
+        stderr(&output)
+    );
+
+    let destination = scratch.path().join("unicode-rar5");
+    let any_non_ascii = std::fs::read_dir(&destination)
+        .unwrap_or_else(|err| panic!("{}: {err}", destination.display()))
+        .flatten()
+        .any(|entry| !entry.file_name().to_string_lossy().is_ascii());
+
+    assert!(
+        any_non_ascii,
+        "expected non-ASCII member in RAR5 extraction"
+    );
+}
+
+#[test]
+fn archive_members_with_spaces_survive_end_to_end() {
+    let scratch = Scratch::new("spaces-in-members");
+    let archive = sample(scratch.path(), "edge/spaces-in-names.zip");
+
+    let output = toss(&[archive.as_path()]);
+    assert!(
+        output.status.success(),
+        "extraction with spaces in member names failed: {}",
+        stderr(&output)
+    );
+
+    let destination = scratch.path().join("spaces-in-names");
+    let has_spaces = std::fs::read_dir(&destination)
+        .unwrap_or_else(|err| panic!("{}: {err}", destination.display()))
+        .flatten()
+        .any(|entry| entry.file_name().to_string_lossy().contains(' '));
+
+    assert!(
+        has_spaces,
+        "expected at least one member with spaces in its name"
+    );
+}
+
+#[test]
+fn empty_archive_extracts_to_an_empty_directory() {
+    let scratch = Scratch::new("empty-archive");
+    let archive = sample(scratch.path(), "edge/empty.zip");
+
+    let output = toss(&[archive.as_path()]);
+    assert!(
+        output.status.success(),
+        "empty archive extraction failed: {}",
+        stderr(&output)
+    );
+
+    let destination = scratch.path().join("empty");
+    assert!(
+        destination.is_dir(),
+        "expected extraction directory to exist even for an empty archive"
+    );
+}
+
+#[test]
+fn zero_byte_member_survives_end_to_end() {
+    let scratch = Scratch::new("zero-byte-member");
+    let archive = sample(scratch.path(), "edge/zero-byte-member.zip");
+
+    let output = toss(&[archive.as_path()]);
+    assert!(
+        output.status.success(),
+        "extraction with zero byte member failed: {}",
+        stderr(&output)
+    );
+
+    let destination = scratch.path().join("zero-byte-member");
+    let zero_byte = std::fs::read_dir(&destination)
+        .unwrap_or_else(|err| panic!("{}: {err}", destination.display()))
+        .flatten()
+        .any(|entry| entry.metadata().map(|m| m.len() == 0).unwrap_or(false));
+
+    assert!(zero_byte, "expected at least one zero-byte member on disk");
+}

@@ -112,10 +112,16 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, TossEr
             if arg == "--help" || arg == "-h" {
                 return Ok(Command::Help);
             }
-            return Err(TossError::invalid_arguments(format!(
-                "unknown option: {}",
-                arg.to_string_lossy()
-            )));
+            let suggestion = suggest_option(&arg.to_string_lossy());
+            let msg = if let Some(s) = suggestion {
+                format!(
+                    "unknown option: {} (did you mean '{s}'?)",
+                    arg.to_string_lossy()
+                )
+            } else {
+                format!("unknown option: {}", arg.to_string_lossy())
+            };
+            return Err(TossError::invalid_arguments(msg));
         }
         positionals.push(arg);
     }
@@ -125,6 +131,15 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, TossEr
     };
 
     let Some(verb) = Verb::from_os_str(leading) else {
+        let leading_str = leading.to_string_lossy();
+        if !std::path::Path::new(leading).exists() {
+            if let Some(suggested) = suggest_verb(&leading_str) {
+                return Err(TossError::invalid_arguments(format!(
+                    "unrecognised verb '{leading_str}' (did you mean '{suggested}'?)"
+                )));
+            }
+        }
+
         return Ok(Command::Automatic {
             paths: to_paths(&positionals),
         });
@@ -139,6 +154,68 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, TossEr
     }
 
     Ok(Command::Explicit { verb, args: inputs })
+}
+
+/// Levenshtein distance between two ASCII strings for typo correction.
+#[must_use]
+pub fn levenshtein(a: &str, b: &str) -> usize {
+    let mut v0: Vec<usize> = (0..=b.len()).collect();
+    let mut v1: Vec<usize> = vec![0; b.len() + 1];
+
+    for (i, ca) in a.chars().enumerate() {
+        v1[0] = i + 1;
+        for (j, cb) in b.chars().enumerate() {
+            let cost = if ca == cb { 0 } else { 1 };
+            v1[j + 1] = (v1[j] + 1).min(v0[j + 1] + 1).min(v0[j] + cost);
+        }
+        v0.copy_from_slice(&v1);
+    }
+    v0[b.len()]
+}
+
+/// Find the closest valid verb if `name` is likely a mistyped verb.
+#[must_use]
+pub fn suggest_verb(name: &str) -> Option<&'static str> {
+    let name_lower = name.to_ascii_lowercase();
+    let mut best: Option<(&'static str, usize)> = None;
+
+    for verb in Verb::ALL {
+        let dist = levenshtein(&name_lower, verb.as_str());
+        if dist <= 2 && dist < verb.as_str().len() {
+            if let Some((_, best_dist)) = best {
+                if dist < best_dist {
+                    best = Some((verb.as_str(), dist));
+                }
+            } else {
+                best = Some((verb.as_str(), dist));
+            }
+        }
+    }
+
+    best.map(|(v, _)| v)
+}
+
+/// Find the closest valid option if `opt` is likely mistyped.
+#[must_use]
+pub fn suggest_option(opt: &str) -> Option<&'static str> {
+    const KNOWN_OPTIONS: [&str; 2] = ["--help", "-h"];
+    let opt_lower = opt.to_ascii_lowercase();
+    let mut best: Option<(&'static str, usize)> = None;
+
+    for &candidate in &KNOWN_OPTIONS {
+        let dist = levenshtein(&opt_lower, candidate);
+        if dist <= 2 {
+            if let Some((_, best_dist)) = best {
+                if dist < best_dist {
+                    best = Some((candidate, dist));
+                }
+            } else {
+                best = Some((candidate, dist));
+            }
+        }
+    }
+
+    best.map(|(c, _)| c)
 }
 
 /// An argument that starts with `-` but is not simply `-`.
@@ -346,5 +423,29 @@ mod tests {
 
         let err = resolve(Path::new(&arg)).expect_err("this path does not exist");
         assert_eq!(err.exit_code(), ExitCode::NotFound);
+    }
+
+    #[test]
+    fn levenshtein_and_suggestions_work() {
+        assert_eq!(super::suggest_verb("extarct"), Some("extract"));
+        assert_eq!(super::suggest_verb("pakc"), Some("pack"));
+        assert_eq!(super::suggest_verb("veiw"), Some("view"));
+        assert_eq!(super::suggest_verb("plya"), Some("play"));
+        assert_eq!(super::suggest_verb("inof"), Some("info"));
+        assert_eq!(super::suggest_verb("completely_random_file.txt"), None);
+
+        assert_eq!(super::suggest_option("--hlp"), Some("--help"));
+        assert_eq!(super::suggest_option("--hepl"), Some("--help"));
+        assert_eq!(super::suggest_option("--json"), None);
+
+        // End to end through parse: mistyped verb triggers suggestion error
+        let err = parse_args(&["extarct", "foo.zip"]).expect_err("should reject mistyped verb");
+        assert_eq!(err.exit_code(), ExitCode::InvalidArguments);
+        assert!(err.to_string().contains("did you mean 'extract'?"));
+
+        // Mistyped option triggers suggestion error
+        let opt_err = parse_args(&["--hlp"]).expect_err("should reject mistyped option");
+        assert_eq!(opt_err.exit_code(), ExitCode::InvalidArguments);
+        assert!(opt_err.to_string().contains("did you mean '--help'?"));
     }
 }

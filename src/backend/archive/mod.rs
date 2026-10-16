@@ -23,7 +23,7 @@ pub mod libarchive;
 
 pub use types::{
     ArchiveCapabilities, ArchiveEntry, ArchiveError, ArchiveFormat, ArchiveInput, ArchiveProbe,
-    CreateRequest, CreateResult, ExtractRequest, ExtractResult,
+    CreateRequest, CreateResult, ExtractRequest, ExtractResult, ProgressListener,
 };
 
 /// What an archive backend can do, expressed as operations.

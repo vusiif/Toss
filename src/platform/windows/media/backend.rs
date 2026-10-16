@@ -16,8 +16,7 @@ use std::ptr;
 use windows::Win32::Foundation::{E_NOINTERFACE, HWND};
 use windows::Win32::Media::MediaFoundation::{
     IMFMediaSession, IMFMediaSource, IMFPresentationDescriptor, IMFSimpleAudioVolume,
-    IMFStreamDescriptor, IMFTopology, IMFVideoDisplayControl,
-    MEDIA_EVENT_GENERATOR_GET_EVENT_FLAGS, MEEndOfPresentation, MESessionClosed,
+    IMFStreamDescriptor, IMFTopology, IMFVideoDisplayControl, MEEndOfPresentation, MESessionClosed,
     MF_E_UNSUPPORTED_SERVICE, MF_EVENT_FLAG_NO_WAIT, MF_OBJECT_TYPE, MF_PD_DURATION,
     MF_RESOLUTION_MEDIASOURCE, MF_TOPOLOGY_OUTPUT_NODE, MF_TOPOLOGY_SOURCESTREAM_NODE,
     MF_TOPONODE_NOSHUTDOWN_ON_REMOVE, MF_TOPONODE_PRESENTATION_DESCRIPTOR, MF_TOPONODE_SOURCE,
@@ -46,16 +45,21 @@ pub(super) fn play(path: &Path) -> Result<(), TossError> {
     // failures too — spend the least, report the most).
     let source = open_source(path)?;
 
-    let (descriptor, planned, duration) = probe(path, &source)?;
-    let duration = duration.min(i64::MAX as u64) as i64;
+    let (descriptor, planned, duration_raw) = probe(path, &source)?;
+    let duration = duration_raw.min(i64::MAX as u64) as i64;
+    let has_video = planned.iter().any(|stream| stream.video);
 
-    if !planned.iter().any(|stream| stream.video) {
+    crate::core::log::out(&super::summary(path, duration_raw, has_video));
+
+    if !has_video {
         // Audio only: one stream, one topology, the blocking pump P7-A
         // proved — no window (D2), and nothing to degrade *to* either.
         let session = Session::new(path)?;
         let built = topology(path, &source, &descriptor, &planned, None)?;
         start(&session, path, &built)?;
-        session.wait_for(path, MEEndOfPresentation.0 as u32, false)?;
+        let mut dashboard = super::dashboard::MediaDashboard::new(duration);
+        session.wait_for_audio(path, MEEndOfPresentation.0 as u32, &mut dashboard)?;
+        dashboard.finish();
         session.close(path)?;
         return Ok(());
     }
@@ -203,54 +207,41 @@ impl Session {
         Ok(Self { inner })
     }
 
-    /// Pump events until one of `kinds` arrives, reporting any event that
-    /// carries a failure instead of waiting on.
-    ///
-    /// This is the whole of "receive / translate asynchronous events" for
-    /// P7-A: `GetEvent` with a zero flag blocks — the documented way to wait
-    /// — and MF guarantees a terminal event for every session it starts, so
-    /// the loop ends at `MEEndOfPresentation` on success or on the first
-    /// event whose *status* is a failure (which is how `MEError` carries its
-    /// reason). Events that are merely progress — geometry updated, streams
-    /// created, session started — pass through without being acted on.
-    ///
-    /// The failure mode this *cannot* have is a silent hang: an event pump
-    /// that waits forever would need MF to break its own guarantee. The
-    /// failure mode it *can* have is returning an error the caller maps
-    /// through `from_hresult`, which is where §24's number comes from.
-    fn wait_for(&self, path: &Path, kind: u32, closing: bool) -> Result<(), TossError> {
+    /// Pump events for audio playback while driving the dynamic terminal dashboard.
+    fn wait_for_audio(
+        &self,
+        path: &Path,
+        kind: u32,
+        dashboard: &mut super::dashboard::MediaDashboard,
+    ) -> Result<(), TossError> {
         loop {
-            // SAFETY: the session is alive for the whole of `play`, and the
-            // three calls only read its state and the event it hands back —
-            // an event owned by this loop, released when it drops.
-            let (arrived, status) = unsafe {
-                let event = self
-                    .inner
-                    .GetEvent(MEDIA_EVENT_GENERATOR_GET_EVENT_FLAGS(0))
-                    .map_err(|err| super::failed(path, "wait for a media event", err))?;
+            // SAFETY: non-blocking check for pending event.
+            let event_res = unsafe { self.inner.GetEvent(MF_EVENT_FLAG_NO_WAIT) };
+            match event_res {
+                Ok(event) => {
+                    // SAFETY: `event` is a live event interface returned by `GetEvent`.
+                    let (arrived, status) = unsafe {
+                        let arrived = event
+                            .GetType()
+                            .map_err(|err| super::failed(path, "read a media event", err))?;
+                        let status = event
+                            .GetStatus()
+                            .map_err(|err| super::failed(path, "read an event's status", err))?;
+                        (arrived, status)
+                    };
 
-                let arrived = event
-                    .GetType()
-                    .map_err(|err| super::failed(path, "read a media event", err))?;
+                    if status.is_err() {
+                        return Err(super::from_hresult(path, "play the file", status));
+                    }
 
-                // `GetStatus` answers two different questions: whether the
-                // call worked (the `Result`), and what the event itself
-                // reports (the `HRESULT` inside). The second one is where
-                // MEError hides its reason, and it is the only place a
-                // playback failure surfaces.
-                let status = event
-                    .GetStatus()
-                    .map_err(|err| super::failed(path, "read an event's status", err))?;
-
-                (arrived, status)
-            };
-
-            if status.is_err() && !closing {
-                return Err(super::from_hresult(path, "play the file", status));
-            }
-
-            if arrived == kind {
-                return Ok(());
+                    if arrived == kind {
+                        return Ok(());
+                    }
+                }
+                Err(_) => {
+                    dashboard.update(&self.inner, path, false);
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
             }
         }
     }

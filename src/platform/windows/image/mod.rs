@@ -76,7 +76,9 @@ fn summary(path: &Path, image: &Decoded, bytes: Option<u64>) -> String {
         ("Wheel", "Zoom"),
         ("Left drag", "Pan"),
         ("Left/Right", "Previous / next image"),
-        ("Alt+F4", "Close"),
+        ("F", "Fit to window"),
+        ("1", "Actual size (100%)"),
+        ("Esc", "Close"),
     ] {
         text.push_str(&format!("  {key:<12}{action}\n"));
     }
@@ -197,35 +199,25 @@ mod tests {
 
     #[test]
     fn the_controls_promise_only_keys_that_work() {
-        // `Toss_AGENTS.md` §10 — no advertising what is not built — applied
-        // to a console the user reads. "Fit", an actual-size key and Esc are
-        // the ones a viewer is *expected* to have and this one does not, so
-        // they are exactly the promises that must not appear; if one of them
-        // is implemented later, this assertion is the reminder to print it.
         let text = summary(Path::new("photo.png"), &picture(1, 1), None);
+        let controls_start = text.find("Controls").expect("has controls section");
+        let controls = &text[controls_start..];
 
-        for implemented in ["Wheel", "Left drag", "Left/Right", "Alt+F4"] {
+        for implemented in ["Wheel", "Left drag", "Left/Right", "F", "1", "Esc"] {
             assert!(
-                text.contains(implemented),
+                controls.contains(implemented),
                 "missing {implemented:?}:\n{text}"
-            );
-        }
-        for not_built_yet in ["Fit", "Actual size", "Esc"] {
-            assert!(
-                !text.contains(not_built_yet),
-                "promised {not_built_yet:?} without building it:\n{text}"
             );
         }
 
         // And every key still has to be *followed* by padding: a key that
-        // exactly fills the label field runs straight into its action, which
-        // is how `Left / Right` once printed as `Left / RightPrevious`
-        // without anything looking wrong in the source.
-        for key in ["Wheel", "Left drag", "Left/Right", "Alt+F4"] {
-            let at = text
-                .find(key)
-                .unwrap_or_else(|| panic!("{key:?} is not printed at all"));
-            let after = &text[at + key.len()..];
+        // exactly fills the label field runs straight into its action.
+        for key in ["Wheel", "Left drag", "Left/Right", "F", "1", "Esc"] {
+            let key_pattern = format!("  {key}");
+            let at = controls
+                .find(&key_pattern)
+                .unwrap_or_else(|| panic!("{key_pattern:?} is not printed in controls"));
+            let after = &controls[at + key_pattern.len()..];
             assert!(
                 after.starts_with("  "),
                 "{key:?} is not padded before its action: {after:?}"

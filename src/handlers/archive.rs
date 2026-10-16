@@ -7,9 +7,19 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::backend::archive::{self, ArchiveFormat, ArchiveInput, ExtractRequest};
+use crate::backend::archive::{
+    self, ArchiveFormat, ArchiveInput, ExtractRequest, ProgressListener,
+};
 use crate::core::error::TossError;
 use crate::core::log;
+
+struct ArchiveProgress(crate::core::progress::ProgressBar);
+
+impl ProgressListener for ArchiveProgress {
+    fn on_progress(&self, entries: u64, bytes: u64, current: &Path) {
+        self.0.update(entries, bytes, current);
+    }
+}
 
 /// Extract `archive` beside itself: `foo.7z` becomes `foo/` (§21).
 pub fn extract(archive: &Path) -> Result<(), TossError> {
@@ -28,10 +38,14 @@ pub fn extract(archive: &Path) -> Result<(), TossError> {
         _ => TossError::other(format!("cannot create {}: {err}", destination.display())),
     })?;
 
-    let request = ExtractRequest {
-        input: ArchiveInput::single(archive.to_path_buf()),
-        output_root: destination.clone(),
-    };
+    let progress_bar = std::sync::Arc::new(ArchiveProgress(
+        crate::core::progress::ProgressBar::new("Extracting"),
+    ));
+    let request = ExtractRequest::new(
+        ArchiveInput::single(archive.to_path_buf()),
+        destination.clone(),
+    )
+    .with_progress(progress_bar.clone());
 
     // The router is built here rather than in dispatch so that the handler
     // remains the only thing that knows an archive is being extracted (§9),
@@ -45,11 +59,24 @@ pub fn extract(archive: &Path) -> Result<(), TossError> {
         .extract(&request)
         .map_err(|err| super::translate(err, archive))?;
 
-    log::out(&format!(
-        "Extracted {} entries to {}",
-        result.entries,
-        destination.display()
-    ));
+    let summary = progress_bar.0.finish();
+
+    if summary.entries > 0 && summary.elapsed.as_secs_f64() >= 0.1 {
+        log::out(&format!(
+            "Extracted {} entries ({}) to {} in {:.1}s ({:.1} MiB/s)",
+            result.entries,
+            crate::core::progress::compact_size(summary.bytes),
+            destination.display(),
+            summary.elapsed.as_secs_f64(),
+            summary.throughput_mibs(),
+        ));
+    } else {
+        log::out(&format!(
+            "Extracted {} entries to {}",
+            result.entries,
+            destination.display()
+        ));
+    }
 
     // §17: reported rather than omitted, so a user who expected a symlink
     // learns that Toss chose not to create it.

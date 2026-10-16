@@ -102,15 +102,50 @@ pub struct ArchiveProbe {
     pub compression: CompressionMethod,
 }
 
+/// A listener that receives progress notifications during archive operations (§20).
+pub trait ProgressListener: Send + Sync {
+    /// Emitted when an entry is processed during extraction or creation.
+    fn on_progress(&self, entries: u64, bytes: u64, current: &Path);
+}
+
 /// Where to extract an archive.
 ///
 /// [`ExtractRequest::output_root`] is chosen by Toss (§21), not by the
 /// backend: the backend is told where to write and never decides from the
 /// archive's own names.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct ExtractRequest {
     pub input: ArchiveInput,
     pub output_root: PathBuf,
+    pub progress: Option<std::sync::Arc<dyn ProgressListener>>,
+}
+
+impl ExtractRequest {
+    /// Construct a new extract request without a progress listener.
+    pub fn new(input: ArchiveInput, output_root: PathBuf) -> Self {
+        Self {
+            input,
+            output_root,
+            progress: None,
+        }
+    }
+
+    /// Attach a progress listener to this extraction request.
+    #[must_use]
+    pub fn with_progress(mut self, progress: std::sync::Arc<dyn ProgressListener>) -> Self {
+        self.progress = Some(progress);
+        self
+    }
+}
+
+impl std::fmt::Debug for ExtractRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExtractRequest")
+            .field("input", &self.input)
+            .field("output_root", &self.output_root)
+            .field("has_progress", &self.progress.is_some())
+            .finish()
+    }
 }
 
 /// What an extraction did.
@@ -136,12 +171,41 @@ pub struct ExtractResult {
 /// `hello/` becomes `hello.7z` beside it, and the backend is told that path
 /// rather than deriving one. Deciding it is what keeps §21's naming rule in
 /// one place instead of inside a library.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct CreateRequest {
     /// The directory whose contents go into the archive.
     pub source: PathBuf,
     /// The archive file to produce. Must not already exist (§22).
     pub output: PathBuf,
+    pub progress: Option<std::sync::Arc<dyn ProgressListener>>,
+}
+
+impl CreateRequest {
+    /// Construct a new create request without a progress listener.
+    pub fn new(source: PathBuf, output: PathBuf) -> Self {
+        Self {
+            source,
+            output,
+            progress: None,
+        }
+    }
+
+    /// Attach a progress listener to this compression request.
+    #[must_use]
+    pub fn with_progress(mut self, progress: std::sync::Arc<dyn ProgressListener>) -> Self {
+        self.progress = Some(progress);
+        self
+    }
+}
+
+impl std::fmt::Debug for CreateRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CreateRequest")
+            .field("source", &self.source)
+            .field("output", &self.output)
+            .field("has_progress", &self.progress.is_some())
+            .finish()
+    }
 }
 
 /// What a creation did.

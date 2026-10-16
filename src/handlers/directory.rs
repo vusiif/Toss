@@ -13,9 +13,17 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::backend::archive::{self, ArchiveFormat, CreateRequest};
+use crate::backend::archive::{self, ArchiveFormat, CreateRequest, ProgressListener};
 use crate::core::error::TossError;
 use crate::core::log;
+
+struct CompressProgress(crate::core::progress::ProgressBar);
+
+impl ProgressListener for CompressProgress {
+    fn on_progress(&self, entries: u64, bytes: u64, current: &Path) {
+        self.0.update(entries, bytes, current);
+    }
+}
 
 /// Compress `directory` into an archive beside it: `hello/` becomes
 /// `hello.7z` (§26).
@@ -38,10 +46,12 @@ pub fn compress(directory: &Path) -> Result<(), TossError> {
         return Err(TossError::OutputConflict(output));
     }
 
-    let request = CreateRequest {
-        source: directory.to_path_buf(),
-        output: output.clone(),
-    };
+    let total_bytes = calculate_directory_size(directory);
+    let progress_bar = std::sync::Arc::new(CompressProgress(
+        crate::core::progress::ProgressBar::new("Compressing").with_total_bytes(total_bytes),
+    ));
+    let request = CreateRequest::new(directory.to_path_buf(), output.clone())
+        .with_progress(progress_bar.clone());
 
     // The router is built here rather than in dispatch so that the handler
     // remains the only thing that knows a directory is being packed, and so
@@ -55,12 +65,25 @@ pub fn compress(directory: &Path) -> Result<(), TossError> {
         .create(&request)
         .map_err(|err| super::translate(err, directory))?;
 
-    log::out(&format!(
-        "Compressed {} entries to {} ({} bytes)",
-        result.entries,
-        output.display(),
-        result.bytes_written
-    ));
+    let summary = progress_bar.0.finish();
+
+    if summary.entries > 0 && summary.elapsed.as_secs_f64() >= 0.1 {
+        log::out(&format!(
+            "Compressed {} entries to {} ({} bytes) in {:.1}s ({:.1} MiB/s)",
+            result.entries,
+            output.display(),
+            result.bytes_written,
+            summary.elapsed.as_secs_f64(),
+            summary.throughput_mibs(),
+        ));
+    } else {
+        log::out(&format!(
+            "Compressed {} entries to {} ({} bytes)",
+            result.entries,
+            output.display(),
+            result.bytes_written
+        ));
+    }
 
     // §17: reported rather than omitted, so a user who pointed at a tree with
     // a symlink in it learns that Toss chose not to store it.
@@ -95,6 +118,35 @@ fn output_archive(directory: &Path) -> Result<PathBuf, TossError> {
     file_name.push(".7z");
 
     Ok(directory.with_file_name(file_name))
+}
+
+/// Quickly calculate total uncompressed bytes of regular files in `dir`.
+///
+/// Bails out with `None` if traversal exceeds 50,000 files to avoid
+/// delaying compression startup on unusually vast directory trees.
+fn calculate_directory_size(dir: &Path) -> Option<u64> {
+    let mut total = 0u64;
+    let mut stack = vec![dir.to_path_buf()];
+    let mut count = 0;
+    while let Some(current) = stack.pop() {
+        let entries = std::fs::read_dir(current).ok()?;
+        for entry in entries.flatten() {
+            count += 1;
+            if count > 50_000 {
+                return None;
+            }
+            if let Ok(ft) = entry.file_type() {
+                if ft.is_dir() {
+                    stack.push(entry.path());
+                } else if ft.is_file() {
+                    if let Ok(meta) = entry.metadata() {
+                        total += meta.len();
+                    }
+                }
+            }
+        }
+    }
+    Some(total)
 }
 
 #[cfg(test)]
@@ -208,5 +260,19 @@ mod tests {
             b"not really an archive",
             "the existing file was touched"
         );
+    }
+
+    #[test]
+    fn calculate_directory_size_sums_file_bytes() {
+        let scratch = Scratch::new("calc-size");
+        let dir = scratch.path().join("data");
+        std::fs::create_dir_all(&dir).expect("created data dir");
+        std::fs::write(dir.join("a.txt"), b"12345").expect("wrote a");
+        let sub = dir.join("sub");
+        std::fs::create_dir_all(&sub).expect("created sub");
+        std::fs::write(sub.join("b.txt"), b"67890").expect("wrote b");
+
+        let size = super::calculate_directory_size(&dir);
+        assert_eq!(size, Some(10));
     }
 }
