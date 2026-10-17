@@ -116,8 +116,27 @@ HEVC-only minimal set stands until a real corpus need says otherwise:
 | `windows` (+ its `windows-*` transitive crates) | MIT OR Apache-2.0 | Win32 bindings, behind the `image`/`media` features | YES |
 | `proc-macro2`, `quote`, `syn`, `unicode-ident` | MIT OR Apache-2.0 (`unicode-ident` **also** carries the Unicode License v3 for its derived identifier data) | build-time only (`windows` crate codegen) | YES |
 
-No other runtime crates exist. The dependency closure is deliberately
-15 crates (`ARCHIVE_BACKEND.md` §55).
+Without the optional `word` feature, no other runtime crates exist. The default dependency closure is deliberately 15 crates (`ARCHIVE_BACKEND.md` §55).
+
+### Vendored Rust components (`third_party/doxx`, behind `word` feature)
+
+When the optional `word` feature is enabled (`--features word` or `--features full`), Toss links an adapted copy of `doxx` 0.1.4 and its pure-Rust document rendering dependencies (provenance: `third_party/UPSTREAM.md` and `third_party/doxx/ORIGIN.md`). All components are under permissive licenses compatible with GPL-3.0-or-later:
+
+| Crate / Component | Version | Upstream License | Role | GPL-3.0-or-later compatible |
+|---|---|---|---|---|
+| `doxx` | 0.1.4 (adapted) | MIT | Terminal document viewer & document model (`third_party/doxx`) | YES |
+| `docx-rs` | 0.4.18 | MIT | Word OpenXML parser | YES |
+| `ratatui` | 0.29 | MIT | Terminal UI framework for document viewer | YES |
+| `crossterm` | 0.27 | MIT | Terminal manipulation and event handling | YES |
+| `quick-xml` | 0.36 | MIT | Fast XML parser for document styling/properties | YES |
+| `image` | 0.25 | MIT OR Apache-2.0 | Pure-Rust image decoding (PNG, JPEG) for document images | YES |
+| `ratatui-image` | 8.0 | MIT | Terminal image widget rendering protocols | YES |
+| `viuer` | 0.7 | MIT | Terminal graphics protocol detection and dispatch | YES |
+| `zip` | 6.0 | MIT | Bounded ZIP reader for docx packages | YES |
+| `tempfile` | 3 | MIT OR Apache-2.0 | RAII per-session temporary directory for image extraction | YES |
+| `regex`, `serde`, `serde_json`, `thiserror`, `anyhow`, `unicode-width`, `unicode-segmentation` | diverse | MIT OR Apache-2.0 | Support libraries for parsing, layout and error reporting | YES |
+
+When the `word` feature is disabled, none of these crates or their object codes are compiled or linked into the resulting binary.
 
 ### Vendored native libraries (`third_party/`, unmodified)
 

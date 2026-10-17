@@ -95,6 +95,7 @@ fn route(verb: Option<Verb>, input: &Input, kind: Kind) -> Result<(), TossError>
         // an image file" (2) — instead of the vaguer "unsupported format".
         Some(Verb::View) => match kind {
             Kind::Image | Kind::Directory => crate::handlers::image::view(input.path()),
+            Kind::Document => crate::handlers::word::view(input.path()),
             _ => Err(TossError::UnsupportedFormat(input.path().to_path_buf())),
         },
 
@@ -126,6 +127,9 @@ fn route(verb: Option<Verb>, input: &Input, kind: Kind) -> Result<(), TossError>
             // viewer does with it is the platform's answer; whether it is an
             // image and which images sit beside it is decided before that.
             Kind::Image => crate::handlers::image::view(input.path()),
+
+            // `toss report.docx` — §18.5's default action for a Word document.
+            Kind::Document => crate::handlers::word::view(input.path()),
 
             // Everything else still has no handler: describe the input, then
             // say which default action is missing (§7, §5).

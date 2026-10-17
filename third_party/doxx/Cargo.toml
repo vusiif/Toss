@@ -1,0 +1,29 @@
+[package]
+name = "doxx"
+version = "0.1.4"
+edition = "2021"
+authors = ["Brandon Greenwell <greenwell.brandon@gmail.com>"]
+description = "Terminal document viewer for .docx files adapted for Toss"
+license = "MIT"
+autobins = false
+
+[lib]
+name = "doxx"
+path = "src/lib.rs"
+
+[dependencies]
+docx-rs = "0.4.18"
+ratatui = "0.29"
+crossterm = "0.28"
+unicode-width = "0.2.0"
+unicode-segmentation = "1.10"
+quick-xml = "0.36"
+regex = "1.10"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "1.0"
+anyhow = "1.0"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+ratatui-image = { version = "8.0", default-features = false, features = ["crossterm"] }
+zip = { version = "8.6", default-features = false, features = ["deflate"] }
+tempfile = "3"

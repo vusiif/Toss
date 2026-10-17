@@ -13,6 +13,7 @@ belong in an adapter or upstream.
 | [zlib](https://zlib.net/) | **1.3.1** | zlib license (permissive) | Deflate, so ZIP entries can be read |
 | [xz / liblzma](https://tukaani.org/xz/) | **5.6.4** | **0BSD** for liblzma | LZMA / LZMA2, so 7z entries can be read and written |
 | [FFmpeg](https://ffmpeg.org/) | **9.0.2** | **LGPL-2.1-or-later** (GPL components *not* enabled, see below) | software HEVC decode + BGRA conversion behind the `media` feature |
+| [doxx](https://github.com/bgreenwell/doxx) | **0.1.4** | **MIT** | Terminal Word viewer adapted as internal crate (WORD_VIEWER.md §2) |
 
 The first three are permissive: static linking them into a single
 executable carries no copyleft obligation, which matters because Toss
@@ -33,6 +34,7 @@ tools, which Toss does not build.
 | zlib | `https://zlib.net/fossils/zlib-1.3.1.tar.gz` | `9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23` | 4,390,808 B / 253 files |
 | xz | `https://tukaani.org/xz/xz-5.6.4.tar.gz` | `269e3f2e512cbd3314849982014dc199a7b2148cf5c91cedc6db629acdf5e09b` | 9,410,885 B / 605 files |
 | FFmpeg | `https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz` | `8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e` | 90,358,343 B / 10,399 files |
+| doxx | `https://crates.io/api/v1/crates/doxx/0.1.4/download` | `5eb8c750f34bb9a8756fea542618521e8cf0138681f50e9073abbd1a24f4ea6b` | See `third_party/doxx/ORIGIN.md` |
 
 Each tree is committed whole — the release tarball contents, not a pruned
 subset. Pruning would save space and buy a build that only fails in ways

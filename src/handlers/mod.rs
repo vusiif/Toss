@@ -24,6 +24,7 @@ pub mod archive;
 pub mod directory;
 pub mod image;
 pub mod media;
+pub mod word;
 
 /// Turn a backend failure into something Toss can report (§23).
 ///

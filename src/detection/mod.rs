@@ -30,6 +30,7 @@ pub enum Kind {
     Archive,
     Image,
     Media,
+    Document,
     Unknown,
 }
 
@@ -44,6 +45,7 @@ impl Kind {
             Self::Archive => Some("archive extraction"),
             Self::Image => Some("image viewing"),
             Self::Media => Some("media playback"),
+            Self::Document => Some("document viewing"),
             Self::Unknown => None,
         }
     }
@@ -55,6 +57,7 @@ impl Kind {
             Self::Archive => "archive",
             Self::Image => "image",
             Self::Media => "media",
+            Self::Document => "document",
             Self::Unknown => "unknown",
         }
     }
@@ -95,6 +98,8 @@ fn kind_from_extension(path: &Path) -> Option<Kind> {
         "jpg" | "jpeg" | "png" | "bmp" | "gif" => Some(Kind::Image),
         // v0.1 media (§18.4)
         "mp4" | "mkv" | "webm" | "avi" | "mov" | "mp3" | "flac" | "wav" => Some(Kind::Media),
+        // Word documents (WORD_VIEWER.md §4.C)
+        "docx" => Some(Kind::Document),
         _ => None,
     }
 }
@@ -214,6 +219,7 @@ mod tests {
             ("a.mp3", Kind::Media),
             ("a.flac", Kind::Media),
             ("a.wav", Kind::Media),
+            ("a.docx", Kind::Document),
         ];
 
         for (name, expected) in cases {
@@ -227,7 +233,7 @@ mod tests {
 
     #[test]
     fn extensions_are_case_insensitive() {
-        for name in ["A.JPG", "Archive.7Z", "clip.MKV"] {
+        for name in ["A.JPG", "Archive.7Z", "clip.MKV", "report.DOCX"] {
             assert!(
                 kind_from_extension(Path::new(name)).is_some(),
                 "{name} was not recognised"

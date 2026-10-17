@@ -25,6 +25,8 @@ image = ["dep:windows"]
 media = ["dep:windows"]
 inspect = []
 hash = []
+# Enables Word document viewing via vendored doxx (WORD_VIEWER.md §3, §4.C).
+word = ["dep:doxx"]
 
 native = []
 portable = []
@@ -35,9 +37,11 @@ full = [
     "media",
     "inspect",
     "hash",
+    "word",
 ]
 
 [dependencies]
+doxx = { path = "third_party/doxx", optional = true }
 
 # Target-gated rather than a plain dependency: `windows` does not compile on
 # non-Windows targets, so a `[dependencies]` entry here would break the Linux
