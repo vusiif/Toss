@@ -1,18 +1,20 @@
+#[allow(clippy::duplicate_mod)]
+#[path = "fixtures/mod.rs"]
 mod fixtures;
 
+use doxx::tempfile::{self, NamedTempFile};
 use doxx::{
     document::{
-        load_document,
+        Document, DocumentElement, DocumentMetadata, FormattedRun, ImageOptions, load_document,
         package::{DocxPackage, PackageError, PackageLimits},
-        Document, DocumentElement, DocumentMetadata, FormattedRun, ImageOptions,
     },
+    image,
     ui::{App, AppOptions},
+    zip::ZipWriter,
+    zip::write::FileOptions,
 };
 use fixtures::SyntheticDocx;
 use std::io::{Cursor, Write};
-use tempfile::NamedTempFile;
-use zip::write::SimpleFileOptions;
-use zip::ZipWriter;
 
 fn generate_test_png(width: u32, height: u32, color: [u8; 4]) -> Vec<u8> {
     let mut img = image::RgbaImage::new(width, height);
@@ -20,15 +22,13 @@ fn generate_test_png(width: u32, height: u32, color: [u8; 4]) -> Vec<u8> {
         *pixel = image::Rgba(color);
     }
     let mut buf = Vec::new();
-    img.write_to(&mut Cursor::new(&mut buf), image::ImageFormat::Png).unwrap();
+    img.write_to(&mut Cursor::new(&mut buf), image::ImageFormat::Png)
+        .unwrap();
     buf
 }
 
 fn write_temp_docx(docx: &SyntheticDocx) -> NamedTempFile {
-    let mut file = tempfile::Builder::new()
-        .suffix(".docx")
-        .tempfile()
-        .unwrap();
+    let mut file = tempfile::Builder::new().suffix(".docx").tempfile().unwrap();
     let bytes = docx.build_bytes();
     file.write_all(&bytes).unwrap();
     file.flush().unwrap();
@@ -69,7 +69,7 @@ fn test_missing_and_duplicate_main_document() {
     let mut buffer = Vec::new();
     {
         let mut zip = ZipWriter::new(Cursor::new(&mut buffer));
-        let opt = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        let opt = FileOptions::default().compression_method(doxx::zip::CompressionMethod::Deflated);
         zip.start_file("[Content_Types].xml", opt).unwrap();
         zip.write_all(b"<Types/>").unwrap();
         zip.finish().unwrap();
@@ -96,8 +96,8 @@ fn test_missing_and_duplicate_main_document() {
 #[test]
 fn test_security_path_traversal_rejection() {
     // Entry with ../
-    let fixture_parent = SyntheticDocx::new("<w:p/>")
-        .with_extra_entry("../../evil.txt", b"malicious content");
+    let fixture_parent =
+        SyntheticDocx::new("<w:p/>").with_extra_entry("../../evil.txt", b"malicious content");
     let err_parent = DocxPackage::from_bytes(&fixture_parent.build_bytes()).unwrap_err();
     assert!(
         matches!(err_parent, PackageError::PathTraversal(_)),
@@ -106,8 +106,8 @@ fn test_security_path_traversal_rejection() {
     );
 
     // Entry with nested /../
-    let fixture_nested = SyntheticDocx::new("<w:p/>")
-        .with_extra_entry("word/../../etc/passwd", b"root:x:0:0");
+    let fixture_nested =
+        SyntheticDocx::new("<w:p/>").with_extra_entry("word/../../etc/passwd", b"root:x:0:0");
     let err_nested = DocxPackage::from_bytes(&fixture_nested.build_bytes()).unwrap_err();
     assert!(
         matches!(err_nested, PackageError::PathTraversal(_)),
@@ -116,8 +116,7 @@ fn test_security_path_traversal_rejection() {
     );
 
     // Entry with absolute leading slash
-    let fixture_abs = SyntheticDocx::new("<w:p/>")
-        .with_extra_entry("/etc/shadow", b"secret");
+    let fixture_abs = SyntheticDocx::new("<w:p/>").with_extra_entry("/etc/shadow", b"secret");
     let err_abs = DocxPackage::from_bytes(&fixture_abs.build_bytes()).unwrap_err();
     assert!(
         matches!(err_abs, PackageError::PathTraversal(_)),
@@ -175,8 +174,14 @@ fn test_external_relationships_sandboxed_no_network() {
         .with_custom_doc_rels(ext_rels);
 
     let pkg = DocxPackage::from_bytes(&fixture.build_bytes()).unwrap();
-    let rel = pkg.document_rels.get("rIdExt").expect("rIdExt must be parsed");
-    assert!(rel.is_external, "TargetMode=External must be marked is_external = true");
+    let rel = pkg
+        .document_rels
+        .get("rIdExt")
+        .expect("rIdExt must be parsed");
+    assert!(
+        rel.is_external,
+        "TargetMode=External must be marked is_external = true"
+    );
     assert_eq!(rel.target, "https://malicious.example.com/exfiltrate.png");
 
     // ImageExtractor::from_package must ignore external relationships without making network requests
@@ -245,47 +250,92 @@ fn test_concurrent_sessions_isolated_and_raii_cleanliness() {
     let img_b_bytes = generate_test_png(2, 2, [0, 255, 0, 255]);
 
     // Create Document A with unique image content A
-    let fixture_a = SyntheticDocx::new("<w:p><w:r><w:t>Doc A</w:t></w:r></w:p>")
-        .with_image("rIdImg1", "word/media/image1.png", &img_a_bytes);
+    let fixture_a = SyntheticDocx::new("<w:p><w:r><w:t>Doc A</w:t></w:r></w:p>").with_image(
+        "rIdImg1",
+        "word/media/image1.png",
+        &img_a_bytes,
+    );
     let tmp_a = write_temp_docx(&fixture_a);
 
     // Create Document B with same internal image path but different image content B
-    let fixture_b = SyntheticDocx::new("<w:p><w:r><w:t>Doc B</w:t></w:r></w:p>")
-        .with_image("rIdImg1", "word/media/image1.png", &img_b_bytes);
+    let fixture_b = SyntheticDocx::new("<w:p><w:r><w:t>Doc B</w:t></w:r></w:p>").with_image(
+        "rIdImg1",
+        "word/media/image1.png",
+        &img_b_bytes,
+    );
     let tmp_b = write_temp_docx(&fixture_b);
 
-    let doc_a = load_document(tmp_a.path(), ImageOptions { enabled: true, ..ImageOptions::default() }).unwrap();
-    let doc_b = load_document(tmp_b.path(), ImageOptions { enabled: true, ..ImageOptions::default() }).unwrap();
+    let doc_a = load_document(
+        tmp_a.path(),
+        ImageOptions {
+            enabled: true,
+            ..ImageOptions::default()
+        },
+    )
+    .unwrap();
+    let doc_b = load_document(
+        tmp_b.path(),
+        ImageOptions {
+            enabled: true,
+            ..ImageOptions::default()
+        },
+    )
+    .unwrap();
 
-    let session_a = doc_a.image_session.as_ref().expect("Image session A must exist");
-    let session_b = doc_b.image_session.as_ref().expect("Image session B must exist");
+    let session_a = doc_a
+        .image_session
+        .as_ref()
+        .expect("Image session A must exist");
+    let session_b = doc_b
+        .image_session
+        .as_ref()
+        .expect("Image session B must exist");
 
     let dir_a = session_a.temp_dir().to_path_buf();
     let dir_b = session_b.temp_dir().to_path_buf();
 
     // 1. Both directories must exist and be distinct
-    assert_ne!(dir_a, dir_b, "Concurrent sessions must have distinct temporary directories");
+    assert_ne!(
+        dir_a, dir_b,
+        "Concurrent sessions must have distinct temporary directories"
+    );
     assert!(dir_a.exists(), "Temp dir A must exist on disk");
     assert!(dir_b.exists(), "Temp dir B must exist on disk");
 
     // 2. Both files must have distinct content corresponding to their source docx
-    let path_img_a = session_a.get_image_path("rIdImg1").expect("Image A must exist");
-    let path_img_b = session_b.get_image_path("rIdImg1").expect("Image B must exist");
+    let path_img_a = session_a
+        .get_image_path("rIdImg1")
+        .expect("Image A must exist");
+    let path_img_b = session_b
+        .get_image_path("rIdImg1")
+        .expect("Image B must exist");
 
     let read_a = std::fs::read(path_img_a).unwrap();
     let read_b = std::fs::read(path_img_b).unwrap();
     assert_eq!(read_a, img_a_bytes, "Image A content must match source A");
     assert_eq!(read_b, img_b_bytes, "Image B content must match source B");
-    assert_ne!(read_a, read_b, "Images from doc A and B must not collide or overwrite");
+    assert_ne!(
+        read_a, read_b,
+        "Images from doc A and B must not collide or overwrite"
+    );
 
     // 3. Drop Document A -> its temp directory must be deleted (RAII cleanup)
     drop(doc_a);
-    assert!(!dir_a.exists(), "Temp dir A must be deleted immediately upon drop");
-    assert!(dir_b.exists(), "Temp dir B must remain active while doc B lives");
+    assert!(
+        !dir_a.exists(),
+        "Temp dir A must be deleted immediately upon drop"
+    );
+    assert!(
+        dir_b.exists(),
+        "Temp dir B must remain active while doc B lives"
+    );
 
     // 4. Drop Document B -> its temp directory must also be deleted
     drop(doc_b);
-    assert!(!dir_b.exists(), "Temp dir B must be deleted immediately upon drop");
+    assert!(
+        !dir_b.exists(),
+        "Temp dir B must be deleted immediately upon drop"
+    );
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -358,16 +408,31 @@ fn test_stable_image_association_across_scrolling() {
             author: None,
         },
         elements,
-        image_options: ImageOptions { enabled: true, ..ImageOptions::default() },
+        image_options: ImageOptions {
+            enabled: true,
+            ..ImageOptions::default()
+        },
         image_session: None,
     };
 
-    let app = App::new(doc, &AppOptions { images: true, ..AppOptions::default() });
+    let app = App::new(
+        doc,
+        &AppOptions {
+            images: true,
+            ..AppOptions::default()
+        },
+    );
 
     // 1. Verify protocols are keyed strictly by element_index (1 and 3)
     assert_eq!(app.image_protocols.len(), 2);
-    assert!(app.image_protocols.contains_key(&1), "Image A protocol must be keyed by element_index 1");
-    assert!(app.image_protocols.contains_key(&3), "Image B protocol must be keyed by element_index 3");
+    assert!(
+        app.image_protocols.contains_key(&1),
+        "Image A protocol must be keyed by element_index 1"
+    );
+    assert!(
+        app.image_protocols.contains_key(&3),
+        "Image B protocol must be keyed by element_index 3"
+    );
 
     // 2. Test stability: When scrolled past element 1 (scroll_offset = 2),
     // Element 3 is the first visible image.
@@ -375,6 +440,6 @@ fn test_stable_image_association_across_scrolling() {
     // which caused Element 3 to be incorrectly rendered using protocol 0 (Image A).
     // With our element_index HashMap mapping:
     // Element 3 strictly queries image_protocols[&3], never index 0!
-    assert!(app.image_protocols.get(&3).is_some());
-    assert!(app.image_protocols.get(&1).is_some());
+    assert!(app.image_protocols.contains_key(&3));
+    assert!(app.image_protocols.contains_key(&1));
 }

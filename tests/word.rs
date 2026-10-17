@@ -9,7 +9,8 @@ struct Scratch(PathBuf);
 
 impl Scratch {
     fn new(name: &str) -> Self {
-        let path = std::env::temp_dir().join(format!("toss-word-test-{}-{name}", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("toss-word-test-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).expect("scratch directory");
         Self(path)
@@ -86,7 +87,8 @@ fn create_test_docx(path: &Path, body_xml: &str) {
         file.write_all(&crc.to_le_bytes()).unwrap();
         file.write_all(&size.to_le_bytes()).unwrap();
         file.write_all(&size.to_le_bytes()).unwrap();
-        file.write_all(&(name_bytes.len() as u16).to_le_bytes()).unwrap();
+        file.write_all(&(name_bytes.len() as u16).to_le_bytes())
+            .unwrap();
         file.write_all(&0u16.to_le_bytes()).unwrap();
         file.write_all(name_bytes).unwrap();
         file.write_all(content).unwrap();
@@ -127,8 +129,10 @@ fn create_test_docx(path: &Path, body_xml: &str) {
     file.write_all(&0x06054b50u32.to_le_bytes()).unwrap();
     file.write_all(&0u16.to_le_bytes()).unwrap();
     file.write_all(&0u16.to_le_bytes()).unwrap();
-    file.write_all(&(cd_records.len() as u16).to_le_bytes()).unwrap();
-    file.write_all(&(cd_records.len() as u16).to_le_bytes()).unwrap();
+    file.write_all(&(cd_records.len() as u16).to_le_bytes())
+        .unwrap();
+    file.write_all(&(cd_records.len() as u16).to_le_bytes())
+        .unwrap();
     file.write_all(&cd_size.to_le_bytes()).unwrap();
     file.write_all(&cd_offset.to_le_bytes()).unwrap();
     file.write_all(&0u16.to_le_bytes()).unwrap();
@@ -164,7 +168,10 @@ fn info_inspects_docx_without_launching_viewer_or_extracting() {
         "expected document detection in info output: {}",
         stdout
     );
-    assert!(output.stderr.is_empty(), "stderr should be empty on success");
+    assert!(
+        output.stderr.is_empty(),
+        "stderr should be empty on success"
+    );
 
     // Must not extract anything to the directory
     let extracted_dir = scratch.path().join("sample");
@@ -213,7 +220,11 @@ fn word_corrupt_file_reports_exit_code_6() {
     let scratch = Scratch::new("corrupt");
     let corrupt_path = scratch.path().join("corrupt.docx");
     // Write invalid data to a .docx file
-    std::fs::write(&corrupt_path, b"PK\x03\x04not a valid zip package content at all").unwrap();
+    std::fs::write(
+        &corrupt_path,
+        b"PK\x03\x04not a valid zip package content at all",
+    )
+    .unwrap();
 
     let output = toss(&[corrupt_path.as_os_str()]);
     assert_eq!(
@@ -351,7 +362,11 @@ fn word_spaces_and_unicode_in_path() {
     );
 
     let output = toss(&[doc_path.as_os_str()]);
-    assert!(output.status.success(), "must handle unicode path: {:?}", output);
+    assert!(
+        output.status.success(),
+        "must handle unicode path: {:?}",
+        output
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         stdout.contains("Unicode path test passed successfully."),
@@ -377,7 +392,11 @@ fn word_sequential_documents_processed_in_order() {
     );
 
     let output = toss(&[doc_a.as_os_str(), doc_b.as_os_str()]);
-    assert!(output.status.success(), "sequential docs must succeed: {:?}", output);
+    assert!(
+        output.status.success(),
+        "sequential docs must succeed: {:?}",
+        output
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         stdout.contains("First Document Content"),
@@ -390,3 +409,11 @@ fn word_sequential_documents_processed_in_order() {
         stdout
     );
 }
+
+#[cfg(feature = "word")]
+#[path = "../third_party/doxx/tests/regression_phase_a.rs"]
+mod regression_phase_a;
+
+#[cfg(feature = "word")]
+#[path = "../third_party/doxx/tests/regression_phase_b.rs"]
+mod regression_phase_b;

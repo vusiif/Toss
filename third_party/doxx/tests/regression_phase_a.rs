@@ -1,20 +1,19 @@
+#[allow(clippy::duplicate_mod)]
+#[path = "fixtures/mod.rs"]
 mod fixtures;
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use doxx::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use doxx::tempfile::{self, NamedTempFile};
 use doxx::{
-    document::{load_document, ImageOptions},
-    widgets::document::render_element_to_text,
     App, AppOptions, DocumentElement, ViewMode,
+    document::{ImageOptions, load_document},
+    widgets::document::render_element_to_text,
 };
 use fixtures::SyntheticDocx;
 use std::io::Write;
-use tempfile::NamedTempFile;
 
 fn write_temp_docx(docx: &SyntheticDocx) -> NamedTempFile {
-    let mut file = tempfile::Builder::new()
-        .suffix(".docx")
-        .tempfile()
-        .unwrap();
+    let mut file = tempfile::Builder::new().suffix(".docx").tempfile().unwrap();
     let bytes = docx.build_bytes();
     file.write_all(&bytes).unwrap();
     file.flush().unwrap();
@@ -47,7 +46,10 @@ fn test_search_input_not_intercepted_by_global_hotkeys() {
         assert!(!quit, "Typing char '{ch}' must not quit the app");
     }
     assert_eq!(app.search_query, "revenue");
-    assert!(!app.search_results.is_empty(), "Should find 'revenue' in document");
+    assert!(
+        !app.search_results.is_empty(),
+        "Should find 'revenue' in document"
+    );
 
     // Keys: 'n', 'p', 'q', 'o', 's', 'h', 'c'
     // In upstream doxx:
@@ -236,8 +238,14 @@ fn test_table_cell_wrapping_and_emoji_safety() {
     let narrow_text = rendered_narrow.join("\n");
 
     // Assert: No panics occurred and contents are present even when wrapped across sub-lines
-    assert!(narrow_text.contains('中') && narrow_text.contains('文'), "Should contain Chinese characters (wrapped safely)");
-    assert!(narrow_text.contains("🙂"), "Should contain emoji 🙂 without slicing panic");
+    assert!(
+        narrow_text.contains('中') && narrow_text.contains('文'),
+        "Should contain Chinese characters (wrapped safely)"
+    );
+    assert!(
+        narrow_text.contains("🙂"),
+        "Should contain emoji 🙂 without slicing panic"
+    );
     assert!(narrow_text.contains("42"), "Should contain '42'");
     assert!(
         narrow_text.contains("TABLE_END"),
@@ -252,7 +260,10 @@ fn test_table_cell_wrapping_and_emoji_safety() {
     // 2. Render with full width (80 columns) to verify standard single-line display
     let rendered_wide = render_element_to_text(&doc.elements[0], 80);
     let wide_text = rendered_wide.join("\n");
-    assert!(wide_text.contains("中文"), "Should contain '中文' on a single line when wide enough");
+    assert!(
+        wide_text.contains("中文"),
+        "Should contain '中文' on a single line when wide enough"
+    );
     assert!(wide_text.contains("🙂"));
     assert!(wide_text.contains("TABLE_END_WITH_LONG_DESCRIPTION"));
 }

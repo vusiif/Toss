@@ -49,13 +49,28 @@ pub fn load_document(file_path: &Path, image_options: ImageOptions) -> Result<Do
     // Open and validate package with security checks and resource limits
     let package = crate::document::package::DocxPackage::open(file_path)?;
 
-    // Read docx using docx-rs from pre-validated/prepared buffer
-    let file_data = if package.has_doc_rels {
-        std::fs::read(file_path)?
-    } else {
-        package.prepared_bytes_for_docx_rs.clone()
-    };
-    let docx = docx_rs::read_docx(&file_data)?;
+    // Parse DOCX XML directly from safe, bounded in-memory package parts
+    use docx_rs::FromXML;
+
+    let doc_bytes = strip_bom(&package.document_xml);
+    let document = docx_rs::Document::from_xml(doc_bytes)
+        .map_err(|e| anyhow::anyhow!("Failed to parse document XML: {e}"))?;
+
+    let mut docx = docx_rs::Docx::new().document(document);
+
+    if let Some(ref num_bytes) = package.numbering_xml {
+        let num_slice = strip_bom(num_bytes);
+        if let Ok(nums) = docx_rs::Numberings::from_xml(num_slice) {
+            docx = docx.numberings(nums);
+        }
+    }
+
+    if let Some(ref style_bytes) = package.styles_xml {
+        let style_slice = strip_bom(style_bytes);
+        if let Ok(styles) = docx_rs::Styles::from_xml(style_slice) {
+            docx = docx.styles(styles);
+        }
+    }
 
     let title = file_path
         .file_stem()
@@ -468,3 +483,13 @@ fn detect_list_from_paragraph_numbering(para: &docx_rs::Paragraph) -> Option<Lis
     }
     None
 }
+
+/// Strip UTF-8 Byte Order Mark (BOM) if present
+fn strip_bom(data: &[u8]) -> &[u8] {
+    if data.starts_with(&[0xef, 0xbb, 0xbf]) {
+        &data[3..]
+    } else {
+        data
+    }
+}
+

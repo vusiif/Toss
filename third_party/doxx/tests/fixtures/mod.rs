@@ -1,6 +1,6 @@
+use doxx::zip::ZipWriter;
+use doxx::zip::write::FileOptions;
 use std::io::{Cursor, Write};
-use zip::write::SimpleFileOptions;
-use zip::ZipWriter;
 
 pub struct SyntheticDocx {
     document_xml: String,
@@ -80,7 +80,10 @@ impl SyntheticDocx {
             r#"    <Relationship Id="{rel_id}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="{target_path}"/>"#
         );
         let updated_rels = match self.custom_doc_rels {
-            Some(existing) => existing.replace("</Relationships>", &format!("{rel_entry}\n</Relationships>")),
+            Some(existing) => existing.replace(
+                "</Relationships>",
+                &format!("{rel_entry}\n</Relationships>"),
+            ),
             None => format!(
                 r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
@@ -96,8 +99,8 @@ impl SyntheticDocx {
         let mut buffer = Vec::new();
         {
             let mut zip = ZipWriter::new(Cursor::new(&mut buffer));
-            let options = SimpleFileOptions::default()
-                .compression_method(zip::CompressionMethod::Deflated);
+            let options =
+                FileOptions::default().compression_method(doxx::zip::CompressionMethod::Deflated);
 
             // [Content_Types].xml
             zip.start_file("[Content_Types].xml", options).unwrap();
@@ -131,10 +134,12 @@ impl SyntheticDocx {
 
             // word/_rels/document.xml.rels
             if let Some(ref custom_rels) = self.custom_doc_rels {
-                zip.start_file("word/_rels/document.xml.rels", options).unwrap();
+                zip.start_file("word/_rels/document.xml.rels", options)
+                    .unwrap();
                 zip.write_all(custom_rels.as_bytes()).unwrap();
             } else if self.include_doc_rels {
-                zip.start_file("word/_rels/document.xml.rels", options).unwrap();
+                zip.start_file("word/_rels/document.xml.rels", options)
+                    .unwrap();
                 zip.write_all(
                     br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">

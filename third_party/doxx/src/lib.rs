@@ -41,8 +41,13 @@ pub enum ColorDepth {
 }
 
 // Re-export commonly used types
+pub use crossterm;
 pub use document::{Document, DocumentElement};
 pub use equation::Equation;
+pub use image;
 pub use image_extractor::ImageExtractor;
+pub use tempfile;
 pub use terminal_image::{TerminalImageRenderer, TerminalImageSupport};
 pub use ui::{print_document_plain, run_toss_viewer, App, AppOptions, TerminalGuard, ViewMode};
+pub use zip;
+

@@ -84,24 +84,20 @@ fn translate_doxx_error(err: doxx::document::DocumentError, path: &Path) -> Toss
                 path: path.to_path_buf(),
                 context: format!("resource budget exceeded: {msg}"),
             },
-            PackageError::IoError(io_err) => {
-                match io_err.kind() {
-                    std::io::ErrorKind::NotFound => TossError::InputNotFound(path.to_path_buf()),
-                    std::io::ErrorKind::PermissionDenied => {
-                        TossError::PermissionDenied(path.to_path_buf())
-                    }
-                    _ => TossError::other(format!("IO error reading package: {io_err}")),
+            PackageError::IoError(io_err) => match io_err.kind() {
+                std::io::ErrorKind::NotFound => TossError::InputNotFound(path.to_path_buf()),
+                std::io::ErrorKind::PermissionDenied => {
+                    TossError::PermissionDenied(path.to_path_buf())
                 }
-            }
+                _ => TossError::other(format!("IO error reading package: {io_err}")),
+            },
         };
     }
 
     if let Some(io_err) = err.downcast_ref::<std::io::Error>() {
         return match io_err.kind() {
             std::io::ErrorKind::NotFound => TossError::InputNotFound(path.to_path_buf()),
-            std::io::ErrorKind::PermissionDenied => {
-                TossError::PermissionDenied(path.to_path_buf())
-            }
+            std::io::ErrorKind::PermissionDenied => TossError::PermissionDenied(path.to_path_buf()),
             _ => TossError::other(format!("IO error: {io_err}")),
         };
     }
@@ -120,6 +116,9 @@ fn ensure_console() {
         fn AllocConsole() -> i32;
         fn AttachConsole(dw_process_id: u32) -> i32;
     }
+
+    // SAFETY: Attaching to or allocating a Windows console window via Win32 kernel32
+    // does not mutate arbitrary memory or violate Rust invariants.
     unsafe {
         if GetConsoleWindow().is_null() {
             const ATTACH_PARENT_PROCESS: u32 = 0xFFFFFFFF;

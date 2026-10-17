@@ -7,7 +7,7 @@ use quick_xml::events::Event;
 use quick_xml::reader::Reader as XmlReader;
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{Cursor, Read, Write};
+use std::io::{Cursor, Read};
 use std::path::Path;
 use thiserror::Error;
 use zip::ZipArchive;
@@ -32,7 +32,19 @@ pub enum PackageError {
 
 impl From<zip::result::ZipError> for PackageError {
     fn from(err: zip::result::ZipError) -> Self {
-        PackageError::ZipError(err.to_string())
+        match err {
+            zip::result::ZipError::UnsupportedArchive(msg)
+                if msg.contains("Password")
+                    || msg.contains("password")
+                    || msg.contains("Encrypted")
+                    || msg.contains("encrypted")
+                    || msg.contains("encryption")
+                    || msg.contains("AES") =>
+            {
+                PackageError::EncryptedPackage
+            }
+            other => PackageError::ZipError(other.to_string()),
+        }
     }
 }
 
@@ -85,7 +97,6 @@ pub struct DocxPackage {
     pub styles_xml: Option<Vec<u8>>,
     pub numbering_xml: Option<Vec<u8>>,
     pub has_doc_rels: bool,
-    pub prepared_bytes_for_docx_rs: Vec<u8>,
 }
 
 impl DocxPackage {
@@ -146,15 +157,12 @@ impl DocxPackage {
         let mut main_doc_count = 0;
 
         for i in 0..archive.len() {
-            let file = archive.by_index_raw(i)
-                .map_err(|e| PackageError::ZipError(e.to_string()))?;
+            let raw_name = {
+                let file = archive.by_index(i).map_err(PackageError::from)?;
+                file.name().to_string()
+            };
 
-            if file.encrypted() {
-                return Err(PackageError::EncryptedPackage);
-            }
-
-            let raw_name = file.name();
-            let sanitized = sanitize_zip_path(raw_name)?;
+            let sanitized = sanitize_zip_path(&raw_name)?;
 
             let lower = sanitized.to_ascii_lowercase();
             if lower == "word/document.xml" {
@@ -288,15 +296,6 @@ impl DocxPackage {
             }
         }
 
-        // Build prepared bytes for docx-rs
-        // If document_rels was absent, inject an empty one in-memory so docx-rs does not fail
-        let prepared_bytes = if has_doc_rels {
-            // Already complete
-            Vec::new()
-        } else {
-            synthesize_doc_rels_archive(archive, &seen_names, &entry_names)?
-        };
-
         Ok(Self {
             main_document_path,
             document_xml,
@@ -305,7 +304,6 @@ impl DocxPackage {
             styles_xml,
             numbering_xml,
             has_doc_rels,
-            prepared_bytes_for_docx_rs: prepared_bytes,
         })
     }
 }
@@ -517,38 +515,3 @@ fn parse_document_rels(
     Ok(map)
 }
 
-/// Synthesize in-memory archive injecting empty document.xml.rels for packages missing it
-fn synthesize_doc_rels_archive<R: Read + std::io::Seek>(
-    archive: &mut ZipArchive<R>,
-    seen_names: &HashMap<String, usize>,
-    entry_names: &[String],
-) -> Result<Vec<u8>, PackageError> {
-    let mut out = Vec::new();
-    {
-        let mut writer = zip::ZipWriter::new(Cursor::new(&mut out));
-        let options = zip::write::SimpleFileOptions::default()
-            .compression_method(zip::CompressionMethod::Deflated);
-
-        for (i, name) in entry_names.iter().enumerate() {
-            let mut file = archive.by_index(i)
-                .map_err(|e| PackageError::ZipError(e.to_string()))?;
-            let mut contents = Vec::new();
-            file.read_to_end(&mut contents)?;
-            writer.start_file(name, options)?;
-            writer.write_all(&contents)?;
-        }
-
-        // Add empty word/_rels/document.xml.rels
-        if !seen_names.contains_key("word/_rels/document.xml.rels") {
-            writer.start_file("word/_rels/document.xml.rels", options)?;
-            writer.write_all(
-                br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-</Relationships>"#,
-            )?;
-        }
-
-        writer.finish()?;
-    }
-    Ok(out)
-}
