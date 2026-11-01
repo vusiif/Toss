@@ -27,3 +27,9 @@
 // a warning go away.
 #[allow(dead_code)]
 pub mod archive;
+
+#[cfg(feature = "pdf")]
+pub mod pdf;
+
+#[cfg(feature = "word-pdf")]
+pub mod word_pdf;

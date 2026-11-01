@@ -17,7 +17,11 @@ const PORTABLE_DIRS: [&str; 4] = ["src/core", "src/handlers", "src/dispatch", "s
 
 /// The capability facade. It may name the platform module — that is what a
 /// facade is for — but it may not carry a platform *type*.
-const PORTABLE_FILES: [&str; 2] = ["src/platform/image.rs", "src/platform/media.rs"];
+const PORTABLE_FILES: [&str; 3] = [
+    "src/platform/image.rs",
+    "src/platform/media.rs",
+    "src/platform/pdf.rs",
+];
 
 /// Anything from this list in code means a Windows type escaped.
 const WINDOWS_TYPES: &[&str] = &[

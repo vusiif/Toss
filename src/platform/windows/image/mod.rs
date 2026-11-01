@@ -1,6 +1,7 @@
 //! The Windows implementation of the image-viewing capability.
 
 mod decode;
+mod source;
 mod viewer;
 
 use std::path::Path;
@@ -44,6 +45,25 @@ pub fn view(request: &ViewRequest) -> Result<(), TossError> {
     viewer::run(request, image)
 }
 
+#[cfg(feature = "pdf")]
+pub fn view_pdf(document: crate::backend::pdf::Document) -> Result<(), TossError> {
+    let image = document.render(0)?;
+    log::out(&format!(
+        "{} — PDF, {} pages\n←/→ or PgUp/PgDn: page | wheel: zoom | drag: pan | F: auto-fit | 1: 144 dpi | Esc: close",
+        document.path().display(),
+        document.len()
+    ));
+    viewer::run_source(
+        source::Source::Pdf(document),
+        0,
+        Decoded {
+            width: image.width,
+            height: image.height,
+            pixels: image.pixels,
+        },
+    )
+}
+
 /// What the console says about the picture the viewer is about to show.
 ///
 /// Only facts Toss already holds: the name from the path, the format from
@@ -73,10 +93,10 @@ fn summary(path: &Path, image: &Decoded, bytes: Option<u64>) -> String {
 
     text.push_str("\nControls\n");
     for (key, action) in [
-        ("Wheel", "Zoom"),
+        ("Wheel", "Zoom around cursor"),
         ("Left drag", "Pan"),
         ("Left/Right", "Previous / next image"),
-        ("F", "Fit to window"),
+        ("F", "Restore automatic fit"),
         ("1", "Actual size (100%)"),
         ("Esc", "Close"),
     ] {

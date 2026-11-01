@@ -1,14 +1,22 @@
 [package]
 name = "toss"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.92"
 description = "Single-binary emergency file utility: drop a file on it, Toss does the safest useful thing."
 repository = "https://github.com/vusiif/Toss"
 license = "GPL-3.0-or-later"
 readme = "README.md"
 keywords = ["cli", "file", "archive", "viewer", "emergency"]
 categories = ["command-line-utilities"]
+
+# Measured full-feature release: smaller than ThinLTO with comparable runtime.
+# Full LTO increases build/link time; debug builds retain their normal profile.
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = "debuginfo"
 
 [features]
 default = []
@@ -25,6 +33,12 @@ image = ["dep:windows"]
 media = ["dep:windows"]
 inspect = []
 hash = []
+# Enables Word document viewing via vendored doxx (WORD_VIEWER.md §3, §4.C).
+word = ["dep:doxx", "dep:rwml", "dep:cfb"]
+# PDF pages share the native raster viewer; no external PDF application needed.
+pdf = ["dep:hayro", "image"]
+# Full-document DOCX conversion, sharing the existing PDF window.
+word-pdf = ["word", "pdf", "dep:docxide-pdf", "dep:zip"]
 
 native = []
 portable = []
@@ -35,9 +49,18 @@ full = [
     "media",
     "inspect",
     "hash",
+    "word",
+    "pdf",
+    "word-pdf",
 ]
 
 [dependencies]
+doxx = { path = "third_party/doxx", optional = true }
+rwml = { version = "=0.1.4", default-features = false, optional = true }
+cfb = { version = "0.10", optional = true }
+hayro = { version = "=0.8.0", optional = true }
+docxide-pdf = { version = "=0.19.0", default-features = false, optional = true }
+zip = { version = "=8.1.0", default-features = false, features = ["deflate"], optional = true }
 
 # Target-gated rather than a plain dependency: `windows` does not compile on
 # non-Windows targets, so a `[dependencies]` entry here would break the Linux
@@ -78,3 +101,7 @@ unsafe_op_in_unsafe_fn = "warn"
 
 [lints.clippy]
 undocumented_unsafe_blocks = "warn"
+
+# Audited Word reader: retain QName validation, omit unused namespace snapshots.
+[patch.crates-io]
+xml-rs = { path = "third_party/xml-rs" }

@@ -440,10 +440,10 @@ fn store(out: &Path, cache: &Path, libraries: [&Path; 3]) {
         };
 
         let destination = cache.join(relative);
-        if let Some(parent) = destination.parent() {
-            if fs::create_dir_all(parent).is_err() {
-                return;
-            }
+        if let Some(parent) = destination.parent()
+            && fs::create_dir_all(parent).is_err()
+        {
+            return;
         }
         if fs::copy(library, &destination).is_err() {
             return;
@@ -1124,8 +1124,8 @@ fn assert_ffmpeg_license(config_h: &Path) {
 fn find_vcvarsall() -> PathBuf {
     const VSWHERE: &str = r"C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe";
 
-    if Path::new(VSWHERE).is_file() {
-        if let Some(output) = Command::new(VSWHERE)
+    if Path::new(VSWHERE).is_file()
+        && let Some(output) = Command::new(VSWHERE)
             .args([
                 "-latest",
                 "-products",
@@ -1138,17 +1138,16 @@ fn find_vcvarsall() -> PathBuf {
             .output()
             .ok()
             .filter(|output| output.status.success())
-        {
-            let install = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-            if !install.is_empty() {
-                let candidate = Path::new(&install)
-                    .join("VC")
-                    .join("Auxiliary")
-                    .join("Build")
-                    .join("vcvarsall.bat");
-                if candidate.is_file() {
-                    return candidate;
-                }
+    {
+        let install = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        if !install.is_empty() {
+            let candidate = Path::new(&install)
+                .join("VC")
+                .join("Auxiliary")
+                .join("Build")
+                .join("vcvarsall.bat");
+            if candidate.is_file() {
+                return candidate;
             }
         }
     }
@@ -1214,13 +1213,14 @@ fn vcvars_env(vcvars: &Path) -> HashMap<String, String> {
 
     let mut map = HashMap::new();
     for line in String::from_utf8_lossy(&output.stdout).lines() {
-        if let Some((key, value)) = line.split_once('=') {
-            if !key.is_empty() && !key.contains(['[', ']', ' ']) {
-                // Windows environment names are case-insensitive and cmd
-                // prints `Path`, not `PATH`: normalising the key here is
-                // what keeps every lookup below one spelling.
-                map.insert(key.to_ascii_uppercase(), value.to_owned());
-            }
+        if let Some((key, value)) = line.split_once('=')
+            && !key.is_empty()
+            && !key.contains(['[', ']', ' '])
+        {
+            // Windows environment names are case-insensitive and cmd
+            // prints `Path`, not `PATH`: normalising the key here is
+            // what keeps every lookup below one spelling.
+            map.insert(key.to_ascii_uppercase(), value.to_owned());
         }
     }
     if !map.contains_key("PATH") {
@@ -1314,15 +1314,14 @@ fn nasm_fingerprint() -> String {
 /// Already-POSIX paths pass through unchanged.
 fn windows_to_posix(path: &Path) -> String {
     let text = path.to_string_lossy().replace('\\', "/");
-    if let Some((drive, rest)) = text.split_once(':') {
-        if drive.len() == 1
-            && drive
-                .chars()
-                .next()
-                .is_some_and(|c| c.is_ascii_alphabetic())
-        {
-            return format!("/{}{}", drive.to_lowercase(), rest);
-        }
+    if let Some((drive, rest)) = text.split_once(':')
+        && drive.len() == 1
+        && drive
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic())
+    {
+        return format!("/{}{}", drive.to_lowercase(), rest);
     }
     text
 }

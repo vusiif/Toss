@@ -10,32 +10,32 @@ use std::mem::size_of;
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BeginPaint, COLOR_WINDOW, DIB_RGB_COLORS, EndPaint,
-    GetSysColorBrush, HALFTONE, HDC, InvalidateRect, PAINTSTRUCT, RGBQUAD, SRCCOPY, ScreenToClient,
-    SetBrushOrgEx, SetStretchBltMode, StretchDIBits, UpdateWindow,
+    FillRect, GetSysColorBrush, HALFTONE, HDC, InvalidateRect, PAINTSTRUCT, RGBQUAD, SRCCOPY,
+    ScreenToClient, SetBrushOrgEx, SetStretchBltMode, StretchDIBits, UpdateWindow,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    ReleaseCapture, SetCapture, VK_ESCAPE, VK_LEFT, VK_RIGHT,
+    ReleaseCapture, SetCapture, VK_ESCAPE, VK_LEFT, VK_NEXT, VK_PRIOR, VK_RIGHT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AdjustWindowRectEx, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW,
     DestroyWindow, DispatchMessageW, GWLP_USERDATA, GetClientRect, GetMessageW, GetSystemMetrics,
     GetWindowLongPtrW, IDC_ARROW, IDC_HAND, LoadCursorW, MSG, PostQuitMessage, RegisterClassExW,
-    SM_CXSCREEN, SM_CYSCREEN, SW_SHOW, SWP_NOMOVE, SWP_NOZORDER, SetCursor, SetForegroundWindow,
-    SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow, TranslateMessage,
-    WM_CAPTURECHANGED, WM_DESTROY, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
-    WM_MOUSEWHEEL, WM_NCDESTROY, WM_PAINT, WM_SETCURSOR, WNDCLASS_STYLES, WNDCLASSEXW,
-    WS_OVERLAPPEDWINDOW,
+    SM_CXSCREEN, SM_CYSCREEN, SW_SHOW, SetCursor, SetForegroundWindow, SetWindowLongPtrW,
+    SetWindowTextW, ShowWindow, TranslateMessage, WM_CAPTURECHANGED, WM_DESTROY, WM_ERASEBKGND,
+    WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCDESTROY, WM_PAINT,
+    WM_SETCURSOR, WM_SIZE, WNDCLASS_STYLES, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
 };
-use windows::core::{HSTRING, PCWSTR, w};
+use windows::core::{PCWSTR, w};
 
 use super::decode::Decoded;
+use super::source::Source;
 use crate::core::error::TossError;
 use crate::core::log;
-use crate::platform::image::{ViewRequest, nav, pan, zoom};
+use crate::platform::image::{ViewRequest, pan, zoom};
 
 /// Class name for every window this process creates.
 const CLASS_NAME: PCWSTR = w!("TossImageViewer");
@@ -47,7 +47,7 @@ const CLASS_NAME: PCWSTR = w!("TossImageViewer");
 /// which is what makes the three ways a window can end — creation refused,
 /// the loop failing, the window closing — all reduce to "one box, one drop".
 ///
-/// `zoom` is the scale selected from the wheel ladder or fit-to-window rule
+/// `zoom` is the scale selected from continuous wheel input or automatic fit
 /// (`platform::image`). `origin` is the cursor
 /// into the legal range Toss defines for panning; the range itself is a rule
 /// and does not live here either. That is the split `IMAGE_VIEWER.md` §4
@@ -55,14 +55,13 @@ const CLASS_NAME: PCWSTR = w!("TossImageViewer");
 /// edges they move between do not.
 struct ViewerState {
     image: Decoded,
-    /// The whole browsing session, and where in it the window is. The set
-    /// and its order were decided before any window existed
-    /// (`handlers::image`); what lives here is only the cursor into them,
-    /// moved by the arrow keys through `nav`'s rule.
-    request: ViewRequest,
+    /// The source owns image order or PDF pages; the window keeps its cursor.
+    source: Source,
+    index: usize,
     zoom: f64,
+    auto_fit: bool,
     /// Where the picture's top-left corner sits in client coordinates.
-    /// Zero at start and whenever the picture fits; the range it is allowed
+    /// Centered on axes that fit; the range it is allowed
     /// to reach is `pan::clamp`'s answer, not this struct's guess.
     origin: (i32, i32),
     /// Present only while the left button is held. The single source of truth
@@ -87,6 +86,10 @@ struct Drag {
 
 /// Show `image` in a native window and run until it closes.
 pub fn run(request: &ViewRequest, image: Decoded) -> Result<(), TossError> {
+    run_source(Source::Images(request.images.clone()), request.index, image)
+}
+
+pub(super) fn run_source(source: Source, index: usize, image: Decoded) -> Result<(), TossError> {
     // Before anything that could depend on it: the API only accepts the
     // setting ahead of first use, so it has to be first. A failure is not
     // fatal — a manifest may already have set it, and the window then simply
@@ -100,7 +103,7 @@ pub fn run(request: &ViewRequest, image: Decoded) -> Result<(), TossError> {
     }
 
     let instance = module()?;
-    let title = title_of(request);
+    let title = source.title(index);
 
     register_class(instance)?;
 
@@ -109,12 +112,14 @@ pub fn run(request: &ViewRequest, image: Decoded) -> Result<(), TossError> {
     // the window is later handed stays valid until nothing can read it.
     let mut state = Box::new(ViewerState {
         image,
-        request: request.clone(),
+        source,
+        index,
         zoom: 1.0,
+        auto_fit: true,
         origin: (0, 0),
         drag: None,
     });
-    let (width, height) = outer_size(&state.image)?;
+    let (width, height) = outer_size(&state.image, state.source.preserve_initial_aspect())?;
 
     // SAFETY: the class is registered, the title outlives the call, and no
     // parameter here is a pointer the window keeps beyond creation — the
@@ -138,7 +143,7 @@ pub fn run(request: &ViewRequest, image: Decoded) -> Result<(), TossError> {
     .map_err(|err| super::failed("open a window", err))?;
 
     // Fit against the actual client area, including images needing <25%.
-    state.zoom = zoom::fit_factor((state.image.width, state.image.height), client_size(window));
+    resize_view(&mut state, window);
 
     // The window is told where the state lives *after* it exists, rather than
     // through creation data and `WM_NCCREATE`, because nothing that reads the
@@ -220,48 +225,15 @@ fn module() -> Result<HINSTANCE, TossError> {
     Ok(HINSTANCE(module.0))
 }
 
-/// The window title: the file being viewed, so a taskbar of one says what it
-/// is showing.
-fn title_of(request: &ViewRequest) -> HSTRING {
-    let name = request
-        .current()
-        .and_then(|path| path.file_name())
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "Toss".to_owned());
-
-    HSTRING::from(name)
-}
-
-/// The outer window size that leaves the client area `image`-sized — capped
-/// at half the screen.
-///
-/// `CreateWindowExW`'s width and height are the *outer* rectangle, so the
-/// frame would eat the image's bottom and right edge if they were passed
-/// through as they stand. This asks the system for the outer size that yields
-/// the client size wanted — arithmetic about the frame, not fit logic: the
-/// image is still drawn one to one and nothing is scaled (IMAGE_VIEWER.md
-/// §11).
-///
-/// The cap is what stops a picture larger than the display from asking for a
-/// window larger than the display: the frame, its edges and most of the
-/// picture would land off-screen where no drag could reach them. Half the
-/// screen, each axis on its own — half because the console of §12 is on that
-/// screen too, and because everything past the cap is exactly what panning
-/// exists for. Where the cap bites, the client rectangle is *not*
-/// picture-sized: the picture is drawn at one to one and the window shows
-/// part of it. That is the one place the "client matches picture" habit of
-/// M3 relaxes, deliberately, and it is not a sizing bug.
-///
-/// Asked once more whenever browsing lands on a picture of a different size
-/// (`browse`), so a large picture arriving is capped the same way the one it
-/// replaced was. Fit-*to*-window — scaling the picture down to the window —
-/// remains §11's "not yet".
-fn outer_size(image: &Decoded) -> Result<(i32, i32), TossError> {
+/// Request a usable client area even for tiny Word icons. The outer frame is
+/// still capped at half the screen. Image scale is selected separately by
+/// `fit_factor`, which never enlarges a small source image automatically.
+fn outer_size(image: &Decoded, preserve_aspect: bool) -> Result<(i32, i32), TossError> {
     let mut frame = RECT {
         left: 0,
         top: 0,
-        right: image.width as i32,
-        bottom: image.height as i32,
+        right: (image.width as i32).max(320),
+        bottom: (image.height as i32).max(200),
     };
 
     // SAFETY: `frame` is writable storage the system fills in; the style and
@@ -269,6 +241,31 @@ fn outer_size(image: &Decoded) -> Result<(i32, i32), TossError> {
     unsafe { AdjustWindowRectEx(&mut frame, WS_OVERLAPPEDWINDOW, false, Default::default()) }
         .map_err(|err| super::failed("size the window", err))?;
 
+    if preserve_aspect {
+        let decorations = (
+            frame.right - frame.left - (image.width as i32).max(320),
+            frame.bottom - frame.top - (image.height as i32).max(200),
+        );
+        let screen = screen_size();
+        let limit = (
+            if screen.0 > 0 {
+                screen.0 / 2
+            } else {
+                frame.right - frame.left
+            },
+            if screen.1 > 0 {
+                screen.1 / 2
+            } else {
+                frame.bottom - frame.top
+            },
+        );
+        let client = crate::platform::pdf::initial_client_size(
+            (image.width, image.height),
+            limit,
+            decorations,
+        );
+        return Ok((client.0 + decorations.0, client.1 + decorations.1));
+    }
     Ok(within_half_screen(
         (frame.right - frame.left, frame.bottom - frame.top),
         screen_size(),
@@ -310,6 +307,18 @@ fn within_half_screen(size: (i32, i32), screen: (i32, i32)) -> (i32, i32) {
 /// that reports "no idea what the mouse is doing over me" is a window people
 /// think has frozen.
 fn register_class(instance: HINSTANCE) -> Result<(), TossError> {
+    // A Word reading session can open and close this viewer repeatedly. The
+    // class belongs to the process and remains registered after a window closes.
+    static REGISTERED: std::sync::OnceLock<Result<(), String>> = std::sync::OnceLock::new();
+    match REGISTERED
+        .get_or_init(|| register_class_once(instance).map_err(|error| error.to_string()))
+    {
+        Ok(()) => Ok(()),
+        Err(message) => Err(TossError::other(message.clone())),
+    }
+}
+
+fn register_class_once(instance: HINSTANCE) -> Result<(), TossError> {
     // SAFETY: the system cursor is a shared, immortal handle; nothing here
     // owns it.
     let cursor = unsafe { LoadCursorW(None, IDC_ARROW) }
@@ -419,9 +428,18 @@ unsafe extern "system" fn window_proc(
                 // `BeginPaint`/`EndPaint` are called as a pair on the same
                 // window, which is the whole of their contract.
                 let dc = BeginPaint(window, &mut paint);
-                render(state, dc);
+                render(state, dc, client_size(window));
                 let _ = EndPaint(window, &paint);
 
+                LRESULT(0)
+            }
+
+            WM_ERASEBKGND if slot != 0 => LRESULT(1),
+
+            WM_SIZE if slot != 0 => {
+                let state = &mut *(slot as *mut ViewerState);
+                resize_view(state, window);
+                let _ = InvalidateRect(Some(window), None, false);
                 LRESULT(0)
             }
 
@@ -435,16 +453,13 @@ unsafe extern "system" fn window_proc(
 
                 let fit =
                     zoom::fit_factor((state.image.width, state.image.height), client_size(window));
-                let next = if wheel != 0 {
-                    zoom::wheel_factor(state.zoom, wheel > 0, fit)
-                } else {
-                    state.zoom
-                };
+                let next = zoom::wheel_factor(state.zoom, wheel, fit);
 
                 if next != state.zoom {
                     let old_factor = state.zoom;
                     let new_factor = next;
                     state.zoom = next;
+                    state.auto_fit = false;
                     // A wheel event ends any drag measured at the old scale.
                     state.drag = None;
 
@@ -454,13 +469,12 @@ unsafe extern "system" fn window_proc(
                     let target_origin =
                         zoom::anchor_origin(state.origin, cursor, old_factor, new_factor);
                     let content = drawn_size(&state.image, new_factor);
-                    state.origin = pan::clamp(target_origin, content, client_size(window));
+                    state.origin = pan::positioned(target_origin, content, client_size(window));
 
                     // SAFETY: the window is live; a null rectangle means the
                     // whole client area, which is exactly what a zoom
-                    // changes — and the erase flag clears what the smaller
-                    // picture no longer covers.
-                    let _ = InvalidateRect(Some(window), None, true);
+                    // changes. Painting fills only the uncovered borders.
+                    let _ = InvalidateRect(Some(window), None, false);
                 }
 
                 LRESULT(0)
@@ -521,7 +535,11 @@ unsafe extern "system" fn window_proc(
                 let cursor = point_of(lparam);
                 let delta = (cursor.0 - drag.at.0, cursor.1 - drag.at.1);
                 let content = drawn_size(&state.image, state.zoom);
-                let next = pan::dragged(drag.origin, delta, content, client_size(window));
+                let next = pan::positioned(
+                    pan::dragged(drag.origin, delta, content, client_size(window)),
+                    content,
+                    client_size(window),
+                );
 
                 if next != state.origin {
                     state.origin = next;
@@ -530,17 +548,8 @@ unsafe extern "system" fn window_proc(
                     // the whole client area, which is what a drag can touch
                     // anywhere.
                     //
-                    // **No erase** — and that is the whole of M8's flicker
-                    // fix. A drag only ever moves an axis that `pan::clamp`
-                    // gives room on, and it only gives room where the
-                    // picture is *larger* than the window, so on that axis
-                    // the new frame reaches past both edges the old one
-                    // showed and covers it outright; the other axis did not
-                    // move at all. Erasing would blank the client area
-                    // before every single mouse move, which is exactly what
-                    // a drag that flashes looks like. This differs from the
-                    // zoom path on purpose: shrinking there really does
-                    // leave pixels the smaller picture no longer covers.
+                    // Image and uncovered borders are painted together without
+                    // blanking the client area before each mouse move.
                     let _ = InvalidateRect(Some(window), None, false);
                 }
 
@@ -591,8 +600,10 @@ unsafe extern "system" fn window_proc(
                 // F: fit-to-window
                 // 1: actual size (100%)
                 match u16::try_from(wparam.0) {
-                    Ok(key) if key == VK_RIGHT.0 => browse(state, window, true),
-                    Ok(key) if key == VK_LEFT.0 => browse(state, window, false),
+                    Ok(key) if key == VK_RIGHT.0 || key == VK_NEXT.0 => browse(state, window, true),
+                    Ok(key) if key == VK_LEFT.0 || key == VK_PRIOR.0 => {
+                        browse(state, window, false)
+                    }
                     Ok(key) if key == VK_ESCAPE.0 => {
                         let _ = DestroyWindow(window);
                     }
@@ -622,27 +633,42 @@ unsafe extern "system" fn window_proc(
     }
 }
 
-/// Fit the whole image to the current client area.
-fn fit_to_window(state: &mut ViewerState, window: HWND) {
+/// Recompute automatic fit on resize; preserve manual zoom and bounded pan.
+fn resize_view(state: &mut ViewerState, window: HWND) {
     let client = client_size(window);
-    state.zoom = zoom::fit_factor((state.image.width, state.image.height), client);
-    state.origin = (0, 0);
+    if client.0 <= 0 || client.1 <= 0 {
+        return;
+    }
+    (state.zoom, state.origin) = zoom::resized(
+        (state.image.width, state.image.height),
+        client,
+        state.zoom,
+        state.origin,
+        state.auto_fit,
+    );
     state.drag = None;
-    // SAFETY: live window
+}
+
+/// Restore automatic fit, including subsequent window resizes.
+fn fit_to_window(state: &mut ViewerState, window: HWND) {
+    state.auto_fit = true;
+    resize_view(state, window);
+    // SAFETY: the window is live; the paint handler covers the whole client area.
     unsafe {
-        let _ = InvalidateRect(Some(window), None, true);
+        let _ = InvalidateRect(Some(window), None, false);
     }
 }
 
 /// Reset zoom to 100% (actual size) at the top-left origin.
 fn actual_size(state: &mut ViewerState, window: HWND) {
+    state.auto_fit = false;
     if state.zoom != 1.0 || state.origin != (0, 0) || state.drag.is_some() {
         state.zoom = 1.0;
-        state.origin = (0, 0);
+        state.origin = pan::positioned((0, 0), drawn_size(&state.image, 1.0), client_size(window));
         state.drag = None;
         // SAFETY: live window
         unsafe {
-            let _ = InvalidateRect(Some(window), None, true);
+            let _ = InvalidateRect(Some(window), None, false);
         }
     }
 }
@@ -650,73 +676,37 @@ fn actual_size(state: &mut ViewerState, window: HWND) {
 /// Move the viewer to the image beside this one, in `forward`'s direction.
 ///
 /// Everything that changes together changes here: the index, the pixels, the
-/// zoom level, the pan origin, the window's size and the title. They are one
+/// zoom level, the pan origin and the title. They are one
 /// step rather than six because they are one *change of subject* — a viewer
 /// showing the previous picture with the current picture's zoom, origin and
 /// title would be showing a mixture of two images.
 ///
-/// The direction is [`nav`]'s rule, including what to do while the picture
-/// it points at will not open (§5 of `IMAGE_VIEWER.md`): try the rest of the
-/// set in order and take the first one that decodes. A failure *before any
-/// window exists* is a different matter and is reported as one — that is the
-/// file the person asked for. A failure inside a set they are browsing is a
-/// detour, and the useful answer to "next picture" is the next picture that
-/// can be shown, not an error about one that cannot.
+/// The source owns navigation: directory images can skip unreadable entries;
+/// PDF pages stop at document ends and report a failed adjacent page without
+/// skipping it. Pixels, page number and title change only after success.
 fn browse(state: &mut ViewerState, window: HWND, forward: bool) {
-    let count = state.request.images.len();
-    let start = state.request.index;
-
-    // The sequence is bounded by the set itself (`nav::attempts`), so a
-    // directory where every other file is broken ends where it began instead
-    // of turning round forever — and a set of one has nothing to try, which
-    // is the `n = 1` boundary behaving as §5 says it must.
-    let mut opened = None;
-    for candidate in nav::attempts(start, count, forward) {
-        let Some(path) = state.request.images.get(candidate).cloned() else {
-            break;
-        };
-        if let Ok(image) = super::decode::decode(&path) {
-            opened = Some((candidate, path, image));
-            break;
+    let (index, image) = match state.source.adjacent(state.index, forward) {
+        Ok(Some(next)) => next,
+        Ok(None) => return,
+        Err(err) => {
+            // Keep the current page and its title when the requested page fails.
+            log::error(format!("could not open the adjacent page: {err}"));
+            return;
         }
-    }
-
-    // Nothing else in the set will open: keep showing what is already on
-    // screen rather than replacing it with nothing.
-    let Some((index, path, image)) = opened else {
-        return;
     };
-
-    state.request.index = index;
+    state.index = index;
     state.image = image;
     state.zoom = 1.0;
     state.origin = (0, 0);
     state.drag = None;
 
-    // The window was sized around the picture it opened on, and the next
-    // picture is under no obligation to be that size: without this, a small
-    // image sits in the corner of a large one's window and a large one is
-    // cropped by a frame sized for something else. Keeping the position
-    // (`SWP_NOMOVE`) and the stacking order (`SWP_NOZORDER`) means only the
-    // client rectangle follows the picture — through the same half-screen
-    // cap `outer_size` applies, so a large picture arriving here is sized
-    // exactly as it would have been had it been the one that opened.
-    if let Ok((width, height)) = outer_size(&state.image) {
-        // SAFETY: `window` is live for the whole message loop, and the
-        // flags say the position and z-order arguments are ignored, so the
-        // size is the only thing being asked for.
-        unsafe {
-            let _ = SetWindowPos(window, None, 0, 0, width, height, SWP_NOMOVE | SWP_NOZORDER);
-        }
-    }
-
-    // Resizing above changes the viewport: never fit to the previous image's
-    // window dimensions.
-    state.zoom = zoom::fit_factor((state.image.width, state.image.height), client_size(window));
+    // Browsing keeps the user's viewport; the next image/page adapts to it.
+    state.auto_fit = true;
+    resize_view(state, window);
 
     // The title names what the window is showing, so it has to follow the
     // picture instead of the one it opened on.
-    let title = title_of(&state.request);
+    let title = state.source.title(state.index);
 
     // SAFETY: `window` is live and `title` outlives the call — it is built
     // from a path the state owns.
@@ -727,7 +717,7 @@ fn browse(state: &mut ViewerState, window: HWND, forward: bool) {
     // SAFETY: `window` is live; a null rectangle means the whole client
     // area, which is what a new picture replaces everywhere at once.
     unsafe {
-        let _ = InvalidateRect(Some(window), None, true);
+        let _ = InvalidateRect(Some(window), None, false);
     }
 
     // The console follows the picture: one line for the step just taken, so
@@ -735,8 +725,7 @@ fn browse(state: &mut ViewerState, window: HWND, forward: bool) {
     // opened on (§12). Appended, never rewritten — the controls were printed
     // once and arrows do not change them — and after the window has been
     // told, so the line reports something already true.
-    let bytes = std::fs::metadata(&path).ok().map(|meta| meta.len());
-    log::out(&super::announce(&path, &state.image, bytes));
+    state.source.announce(state.index, &state.image);
 }
 
 /// Draw `state`'s pixels into `dc` at the current zoom and pan origin.
@@ -744,31 +733,18 @@ fn browse(state: &mut ViewerState, window: HWND, forward: bool) {
 /// The *source* rectangle is always the whole image and the *destination* is
 /// its scaled size starting at the origin — which is the whole of what
 /// zooming and panning are here: GDI does the interpolation, Toss supplies
-/// the ladder and the edges. Content past the client edge is clipped by the
+/// the zoom factor and the edges. Content past the client edge is clipped by the
 /// device context, so an origin of zero is M3's picture exactly, and a
 /// negative one is that same picture slid under the window's corner with
 /// nothing but the frame of the window hiding what went past.
-fn render(state: &ViewerState, dc: HDC) {
+fn render(state: &ViewerState, dc: HDC, client: (i32, i32)) {
     let image = &state.image;
     let source = (image.width as i32, image.height as i32);
     let destination = drawn_size(image, state.zoom);
     let info = bitmap_info(image);
 
-    // Scale by averaging — but only when shrinking.
-    //
-    // Shrinking a picture with the default mode *discards* samples — every
-    // other row, every other column — and a large image scaled down that way
-    // grows a lattice of false detail across anything fine: the moire
-    // reported against M8. HALFTONE averages the samples it would otherwise
-    // skip, and the API asks for the brush origin to be set alongside it, so
-    // those two lines are one decision rather than two.
-    //
-    // Enlarging and one-to-one are left alone on purpose: there is no
-    // sample to drop when the destination walks the source rather than
-    // skipping it, and M4's enlargement is an assertion someone can read —
-    // its smoke checks that the corner colour survives two zooms, which
-    // halftoning would smear.
-    if destination.0 < source.0 || destination.1 < source.1 {
+    // Interpolate scaling in either direction; 100% preserves exact source pixels.
+    if destination.0 != source.0 || destination.1 != source.1 {
         // SAFETY: `dc` came from the `BeginPaint` a line above and stays
         // valid until `EndPaint`; both calls only set state on it.
         // `SetStretchBltMode` answers with the previous mode and
@@ -805,6 +781,49 @@ fn render(state: &ViewerState, dc: HDC) {
             DIB_RGB_COLORS,
             SRCCOPY,
         );
+    }
+    let width = client.0.max(0);
+    let height = client.1.max(0);
+    let left = state.origin.0.clamp(0, width);
+    let right = state.origin.0.saturating_add(destination.0).clamp(0, width);
+    let top = state.origin.1.clamp(0, height);
+    let bottom = state
+        .origin
+        .1
+        .saturating_add(destination.1)
+        .clamp(0, height);
+    for rect in [
+        RECT {
+            left: 0,
+            top: 0,
+            right: width,
+            bottom: top,
+        },
+        RECT {
+            left: 0,
+            top: bottom,
+            right: width,
+            bottom: height,
+        },
+        RECT {
+            left: 0,
+            top,
+            right: left,
+            bottom,
+        },
+        RECT {
+            left: right,
+            top,
+            right: width,
+            bottom,
+        },
+    ] {
+        if rect.right > rect.left && rect.bottom > rect.top {
+            // SAFETY: the paint DC and rectangle are valid; the system owns the brush.
+            unsafe {
+                let _ = FillRect(dc, &rect, GetSysColorBrush(COLOR_WINDOW));
+            }
+        }
     }
 }
 
@@ -964,7 +983,7 @@ mod tests {
         // picture and silently clip its bottom and right edge — a bug that
         // looks like a rendering problem rather than a sizing one.
         let image = decode(&sample("odd.png")).expect("the sample decodes");
-        let (width, height) = outer_size(&image).expect("the frame can be measured");
+        let (width, height) = outer_size(&image, false).expect("the frame can be measured");
 
         assert!(
             width > 7,
@@ -1083,7 +1102,7 @@ mod tests {
 
     #[test]
     fn a_scale_beyond_a_device_coordinate_stops_at_the_largest_one() {
-        // The dimensions came from a file and the scale from the ladder, so
+        // The dimensions came from a file and the scale from wheel input, so
         // a huge image at four times size would ask for coordinates an `i32`
         // device position cannot hold. No panic, and no wrap into a negative
         // rectangle either (§23).

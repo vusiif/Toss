@@ -29,5 +29,20 @@ fn main() -> std::process::ExitCode {
 /// for the human and an exit code for the script; nothing here panics on
 /// input the user chose (§23, §24).
 fn run() -> Result<(), TossError> {
+    #[cfg(feature = "word-pdf")]
+    {
+        let mut args = std::env::args_os().skip(1);
+        if args.next().as_deref() == Some(std::ffi::OsStr::new("--internal-docx-pdf")) {
+            let path = args
+                .next()
+                .ok_or_else(|| TossError::invalid_arguments("missing DOCX path"))?;
+            if args.next().is_some() {
+                return Err(TossError::invalid_arguments(
+                    "unexpected converter arguments",
+                ));
+            }
+            return backend::word_pdf::worker(std::path::Path::new(&path));
+        }
+    }
     dispatch::run(cli::parse(std::env::args_os().skip(1))?)
 }

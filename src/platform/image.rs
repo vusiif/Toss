@@ -72,9 +72,9 @@ fn ensure_openable(request: &ViewRequest) -> Result<(), TossError> {
 /// The zoom rule: which levels exist, where a viewer starts, and what
 /// stepping does.
 ///
-/// **Toss-owned** (`IMAGE_VIEWER.md` §4): the ladder and its two limits are
-/// rules, so a future backend on another platform steps through the same five
-/// levels without being told what they are. Which level is *current* is
+/// **Toss-owned** (`IMAGE_VIEWER.md` §4): the continuous scale and its limits are
+/// rules, so every backend applies the same delta-based scaling and bounds.
+/// The current scale and interaction mode are
 /// interaction state and belongs to the platform half — the wheel event that
 /// moves it happens there.
 ///
@@ -86,11 +86,9 @@ fn ensure_openable(request: &ViewRequest) -> Result<(), TossError> {
 /// the consumer is structurally absent.
 #[cfg_attr(not(all(windows, feature = "image")), allow(dead_code))]
 pub mod zoom {
-    /// The levels, as multiples of the image's own size.
-    ///
-    /// Wheel zoom uses five fixed rungs. Fit-to-window may use a smaller or
-    /// intermediate scale so the whole image remains visible.
-    pub const STEPS: [f64; 5] = [0.25, 0.5, 1.0, 2.0, 4.0];
+    /// Preserve the existing 25%–400% range, including smaller fit scales.
+    pub const MIN_FACTOR: f64 = 0.25;
+    pub const MAX_FACTOR: f64 = 4.0;
 
     /// Compute the new origin that keeps `cursor` over the same logical pixel of
     /// the image across a zoom factor change (§13.9 of IMAGE_VIEWER.md).
@@ -111,7 +109,7 @@ pub mod zoom {
     }
 
     /// Fit the whole image without enlarging smaller pictures. The fit factor
-    /// is independent of the wheel ladder so even very large images fit.
+    /// is independent of the wheel range so even very large images fit.
     #[must_use]
     pub fn fit_factor(image_size: (u32, u32), client_size: (i32, i32)) -> f64 {
         if image_size.0 == 0 || image_size.1 == 0 || client_size.0 <= 0 || client_size.1 <= 0 {
@@ -123,59 +121,75 @@ pub mod zoom {
         scale_x.min(scale_y).min(1.0)
     }
 
-    /// Move to the next wheel rung, including the fit factor below 25%.
+    /// Continuous exponential zoom: 12% per wheel detent (120 units).
+    /// Fractional deltas from precision wheels keep their full resolution.
     #[must_use]
-    pub fn wheel_factor(current: f64, forward: bool, fit: f64) -> f64 {
-        let minimum = fit.min(STEPS[0]);
-        if forward {
-            STEPS
-                .iter()
-                .copied()
-                .find(|&step| step > current)
-                .unwrap_or(current)
+    pub fn wheel_factor(current: f64, delta: i16, fit: f64) -> f64 {
+        (current * 1.12_f64.powf(f64::from(delta) / 120.0)).clamp(fit.min(MIN_FACTOR), MAX_FACTOR)
+    }
+
+    /// Automatic mode follows the viewport; manual mode retains the chosen scale.
+    #[must_use]
+    pub fn resized(
+        image: (u32, u32),
+        client: (i32, i32),
+        factor: f64,
+        origin: (i32, i32),
+        auto_fit: bool,
+    ) -> (f64, (i32, i32)) {
+        let factor = if auto_fit {
+            fit_factor(image, client)
         } else {
-            STEPS
-                .iter()
-                .rev()
-                .copied()
-                .find(|&step| step < current)
-                .unwrap_or(minimum)
-                .min(current)
-        }
+            factor
+        };
+        let content = (
+            (image.0 as f64 * factor).round().max(1.0) as i32,
+            (image.1 as f64 * factor).round().max(1.0) as i32,
+        );
+        (factor, super::pan::positioned(origin, content, client))
     }
 
     #[cfg(test)]
     mod tests {
-        use super::{STEPS, anchor_origin, fit_factor, wheel_factor};
+        use super::{MAX_FACTOR, MIN_FACTOR, anchor_origin, fit_factor, resized, wheel_factor};
 
         #[test]
-        fn the_ladder_is_ordered_and_includes_actual_size() {
-            for pair in STEPS.windows(2) {
-                assert!(
-                    pair[0] < pair[1],
-                    "the levels must increase strictly, got {pair:?}"
-                );
-            }
-
-            assert!(STEPS.contains(&1.0));
+        fn resize_follows_fit_until_manual_zoom_and_can_return_to_fit() {
+            let image = (2000, 1000);
+            let first = resized(image, (1000, 500), 1.0, (0, 0), true);
+            assert_eq!(first, (0.5, (0, 0)));
+            assert_eq!(
+                resized(image, (500, 500), first.0, first.1, true),
+                (0.25, (0, 125))
+            );
+            assert_eq!(
+                resized(image, (1000, 500), 1.0, (-200, -100), false),
+                (1.0, (-200, -100))
+            );
+            assert_eq!(resized(image, (1000, 500), 1.0, (-200, -100), true), first);
         }
 
         #[test]
-        fn stepping_up_stops_at_the_largest_level() {
-            let mut scale = 1.0;
-            for _ in 0..10 {
-                scale = wheel_factor(scale, true, 1.0);
+        fn wheel_preserves_precision_and_is_reversible_away_from_limits() {
+            let full = wheel_factor(1.0, 120, 0.1);
+            assert!((full - 1.12).abs() < 1e-12);
+            let small = wheel_factor(1.0, 15, 0.1);
+            assert!(small > 1.0 && small < full);
+            let mut accumulated = 1.0;
+            for _ in 0..8 {
+                accumulated = wheel_factor(accumulated, 15, 0.1);
             }
-            assert_eq!(scale, *STEPS.last().expect("not empty"));
+            assert!((accumulated - full).abs() < 1e-12);
+            assert!((wheel_factor(full, -120, 0.1) - 1.0).abs() < 1e-12);
+            assert_eq!(wheel_factor(0.6, 0, 0.1), 0.6);
         }
 
         #[test]
-        fn stepping_down_stops_at_the_smallest_level() {
-            let mut scale = 1.0;
-            for _ in 0..10 {
-                scale = wheel_factor(scale, false, 1.0);
-            }
-            assert_eq!(scale, STEPS[0]);
+        fn wheel_stops_at_limits_without_skipping_small_fit() {
+            assert_eq!(wheel_factor(4.0, 120, 0.08), MAX_FACTOR);
+            assert_eq!(wheel_factor(0.08, -120, 0.08), 0.08);
+            assert_eq!(wheel_factor(0.25, -120, 1.0), MIN_FACTOR);
+            assert!(wheel_factor(0.08, 120, 0.08) < 0.1);
         }
 
         #[test]
@@ -208,17 +222,6 @@ pub mod zoom {
             assert_eq!(fit_factor((0, 100), (640, 480)), 1.0);
             assert_eq!(fit_factor((100, 100), (0, 0)), 1.0);
         }
-
-        #[test]
-        fn wheel_steps_from_arbitrary_fit_and_returns_to_small_fit() {
-            assert_eq!(wheel_factor(0.08, true, 0.08), 0.25);
-            assert_eq!(wheel_factor(0.25, false, 0.08), 0.08);
-            assert_eq!(wheel_factor(0.08, false, 0.08), 0.08);
-            assert_eq!(wheel_factor(0.6, true, 0.6), 1.0);
-            assert_eq!(wheel_factor(0.6, false, 0.6), 0.5);
-            assert_eq!(wheel_factor(4.0, true, 0.08), 4.0);
-            assert_eq!(wheel_factor(0.25, false, 1.0), 0.25);
-        }
     }
 }
 
@@ -249,6 +252,24 @@ pub mod pan {
         (
             axis(origin.0, content.0, viewport.0),
             axis(origin.1, content.1, viewport.1),
+        )
+    }
+
+    /// Center axes that fit; retain bounded panning on overflowing axes.
+    #[must_use]
+    pub fn positioned(origin: (i32, i32), content: (i32, i32), viewport: (i32, i32)) -> (i32, i32) {
+        let bounded = clamp(origin, content, viewport);
+        (
+            if viewport.0 > content.0 {
+                (viewport.0 - content.0) / 2
+            } else {
+                bounded.0
+            },
+            if viewport.1 > content.1 {
+                (viewport.1 - content.1) / 2
+            } else {
+                bounded.1
+            },
         )
     }
 

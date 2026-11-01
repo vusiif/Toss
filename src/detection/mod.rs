@@ -30,6 +30,8 @@ pub enum Kind {
     Archive,
     Image,
     Media,
+    Document,
+    Pdf,
     Unknown,
 }
 
@@ -44,6 +46,8 @@ impl Kind {
             Self::Archive => Some("archive extraction"),
             Self::Image => Some("image viewing"),
             Self::Media => Some("media playback"),
+            Self::Document => Some("document viewing"),
+            Self::Pdf => Some("PDF viewing"),
             Self::Unknown => None,
         }
     }
@@ -55,6 +59,8 @@ impl Kind {
             Self::Archive => "archive",
             Self::Image => "image",
             Self::Media => "media",
+            Self::Document => "document",
+            Self::Pdf => "PDF",
             Self::Unknown => "unknown",
         }
     }
@@ -95,6 +101,9 @@ fn kind_from_extension(path: &Path) -> Option<Kind> {
         "jpg" | "jpeg" | "png" | "bmp" | "gif" => Some(Kind::Image),
         // v0.1 media (§18.4)
         "mp4" | "mkv" | "webm" | "avi" | "mov" | "mp3" | "flac" | "wav" => Some(Kind::Media),
+        // Word documents (WORD_VIEWER.md §4.C)
+        "docx" | "doc" => Some(Kind::Document),
+        "pdf" => Some(Kind::Pdf),
         _ => None,
     }
 }
@@ -127,6 +136,9 @@ fn read_header(path: &Path, buf: &mut [u8]) -> Option<usize> {
 }
 
 fn kind_from_magic(header: &[u8]) -> Option<Kind> {
+    if header.starts_with(b"%PDF-") {
+        return Some(Kind::Pdf);
+    }
     // Archives
     if header.starts_with(b"PK\x03\x04")
         || header.starts_with(b"PK\x05\x06")
@@ -214,6 +226,10 @@ mod tests {
             ("a.mp3", Kind::Media),
             ("a.flac", Kind::Media),
             ("a.wav", Kind::Media),
+            ("a.docx", Kind::Document),
+            ("a.doc", Kind::Document),
+            ("a.DOC", Kind::Document),
+            ("a.PDF", Kind::Pdf),
         ];
 
         for (name, expected) in cases {
@@ -227,7 +243,7 @@ mod tests {
 
     #[test]
     fn extensions_are_case_insensitive() {
-        for name in ["A.JPG", "Archive.7Z", "clip.MKV"] {
+        for name in ["A.JPG", "Archive.7Z", "clip.MKV", "report.DOCX"] {
             assert!(
                 kind_from_extension(Path::new(name)).is_some(),
                 "{name} was not recognised"
@@ -245,8 +261,9 @@ mod tests {
 
     #[test]
     fn magic_bytes_identify_each_family_without_a_usable_extension() {
-        let cases: [(&[u8], Kind); 15] = [
+        let cases: [(&[u8], Kind); 16] = [
             (b"PK\x03\x04rest", Kind::Archive),
+            (b"%PDF-1.7", Kind::Pdf),
             (b"PK\x05\x06", Kind::Archive),
             (b"7z\xBC\xAF\x27\x1C", Kind::Archive),
             (b"Rar!\x1A\x07\x00", Kind::Archive),
