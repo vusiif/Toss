@@ -27,6 +27,14 @@ impl Workbook {
         no_header: bool,
         delimiter: Option<u8>,
     ) -> Result<Self> {
+        Self::open_with_encoding(path, no_header, delimiter, None)
+    }
+    pub fn open_with_encoding(
+        path: impl AsRef<Path>,
+        no_header: bool,
+        delimiter: Option<u8>,
+        encoding: Option<&str>,
+    ) -> Result<Self> {
         let path = path.as_ref();
         let extension = path.extension().and_then(|s| s.to_str()).unwrap_or("");
         if extension.eq_ignore_ascii_case("csv") || extension.eq_ignore_ascii_case("tsv") {
@@ -38,7 +46,9 @@ impl Workbook {
             return Ok(Self {
                 sheets: None,
                 source_bytes: None,
-                csv: Some(Arc::new(crate::csv_input::read(path, sep)?)),
+                csv: Some(Arc::new(crate::csv_input::read_with_encoding(
+                    path, sep, encoding,
+                )?)),
                 csv_name: path
                     .file_stem()
                     .unwrap_or_default()
@@ -53,6 +63,9 @@ impl Workbook {
         }
         if delimiter.is_some() {
             anyhow::bail!("a delimiter applies only to CSV/TSV");
+        }
+        if encoding.is_some() {
+            anyhow::bail!("an encoding applies only to CSV/TSV");
         }
         let bytes = crate::admission::snapshot(path)?;
         let reader = Cursor::new(bytes.clone());

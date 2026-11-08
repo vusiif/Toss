@@ -2297,6 +2297,7 @@ dependencies = [
  "crossterm 0.28.1",
  "csv",
  "dirs",
+ "encoding_rs",
  "quick-xml 0.39.4",
  "ratatui",
  "regex",

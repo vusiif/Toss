@@ -18,6 +18,15 @@ pub fn view_with_options(path: &Path, options: SheetOptions) -> Result<(), TossE
     {
         use std::io::IsTerminal;
         use toss_sheet::{config::Config, workbook::Workbook};
+        if options.encoding.is_some()
+            && !path.extension().is_some_and(|ext| {
+                ext.eq_ignore_ascii_case("csv") || ext.eq_ignore_ascii_case("tsv")
+            })
+        {
+            return Err(TossError::invalid_arguments(
+                "an encoding applies only to CSV/TSV",
+            ));
+        }
         if options.delimiter.is_some()
             && !path.extension().is_some_and(|ext| {
                 ext.eq_ignore_ascii_case("csv") || ext.eq_ignore_ascii_case("tsv")
@@ -32,20 +41,25 @@ pub fn view_with_options(path: &Path, options: SheetOptions) -> Result<(), TossE
         }
         let interactive = options.format == SheetFormat::Auto && std::io::stdout().is_terminal();
         let no_header = options.no_header || (interactive && !options.header);
-        let mut workbook = Workbook::open_with_options(path, no_header, options.delimiter)
-            .map_err(|error| {
-                if error
-                    .downcast_ref::<std::io::Error>()
-                    .is_some_and(|e| e.kind() == std::io::ErrorKind::PermissionDenied)
-                {
-                    TossError::PermissionDenied(path.to_path_buf())
-                } else {
-                    TossError::CorruptInput {
-                        path: path.to_path_buf(),
-                        context: format!("{error:#}"),
-                    }
+        let mut workbook = Workbook::open_with_encoding(
+            path,
+            no_header,
+            options.delimiter,
+            options.encoding.as_deref(),
+        )
+        .map_err(|error| {
+            if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|e| e.kind() == std::io::ErrorKind::PermissionDenied)
+            {
+                TossError::PermissionDenied(path.to_path_buf())
+            } else {
+                TossError::CorruptInput {
+                    path: path.to_path_buf(),
+                    context: format!("{error:#}"),
                 }
-            })?;
+            }
+        })?;
         let names = workbook.sheet_names();
         let sheet = if let Some(name) = options.sheet {
             if !names.contains(&name) {

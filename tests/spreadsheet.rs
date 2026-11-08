@@ -195,6 +195,73 @@ fn explicit_header_preserves_export_contract_and_conflicts_are_rejected() {
         assert!(output.stdout.is_empty());
     }
 }
+#[cfg(feature = "spreadsheet")]
+#[test]
+fn csv_encoding_selection_and_inference_are_strict_and_visible() {
+    let expected = json_view("encoding-utf8.csv", &["--no-header"]);
+    for name in [
+        "encoding-utf8-bom.csv",
+        "encoding-utf16le.csv",
+        "encoding-utf16be.csv",
+    ] {
+        let value = json_view(name, &["--no-header"]);
+        assert_eq!(value["data"], expected["data"]);
+    }
+    let path = fixture("encoding-gb18030.csv");
+    let automatic = run(&[
+        "view".as_ref(),
+        path.as_os_str(),
+        "--no-header".as_ref(),
+        "--format".as_ref(),
+        "json".as_ref(),
+    ]);
+    assert!(automatic.status.success());
+    assert!(String::from_utf8_lossy(&automatic.stderr).contains("inferred as GB18030"));
+    let value: serde_json::Value = serde_json::from_slice(&automatic.stdout).unwrap();
+    assert_eq!(value["data"], expected["data"]);
+    assert_eq!(
+        json_view(
+            "encoding-gb18030.csv",
+            &["--no-header", "--encoding", "gb18030"]
+        )["data"],
+        expected["data"]
+    );
+    assert_eq!(
+        json_view(
+            "encoding-gb18030.csv",
+            &["--no-header", "--encoding", "gbk"]
+        )["data"],
+        expected["data"]
+    );
+    assert_eq!(
+        json_view(
+            "encoding-utf16le-no-bom.csv",
+            &["--no-header", "--encoding", "utf-16le"]
+        )["data"],
+        expected["data"]
+    );
+    let tsv = json_view("encoding-utf16be.tsv", &[]);
+    assert_eq!(tsv["data"][0], serde_json::json!(["张三", "00123"]));
+    for (name, options) in [
+        ("encoding-malformed-utf16.csv", vec![]),
+        ("encoding-malformed-utf8-bom.csv", vec![]),
+        ("encoding-malformed-gb18030.csv", vec![]),
+        ("encoding-utf16le.csv", vec!["--encoding", "utf-8"]),
+        ("basic.xlsx", vec!["--encoding", "utf-8"]),
+    ] {
+        let path = fixture(name);
+        let mut args = vec![
+            "view".as_ref(),
+            path.as_os_str(),
+            "--format".as_ref(),
+            "json".as_ref(),
+        ];
+        args.extend(options.iter().map(std::ffi::OsStr::new));
+        let out = run(&args);
+        assert!(!out.status.success(), "{name}");
+        assert!(out.stdout.is_empty(), "{name}");
+    }
+}
 #[cfg(not(feature = "spreadsheet"))]
 #[test]
 fn structured_table_options_still_report_disabled_feature() {

@@ -212,6 +212,7 @@ Spreadsheet options (after view; options require exactly one table file):
   --sheet NAME        select a worksheet by its exact name
   --header            explicitly use the first row as a fixed table header
   --no-header         keep the first row as data (interactive default)
+  --encoding NAME     CSV/TSV: auto, utf-8, utf-16le, utf-16be, gb18030 or gbk
   --delimiter CHAR    one ASCII delimiter, CSV/TSV only
   --format csv|json   write data to stdout, even when attached to a terminal
 

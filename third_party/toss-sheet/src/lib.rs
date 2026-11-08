@@ -15,5 +15,6 @@ pub mod admission;
 mod search;
 
 mod colors;
+mod csv_encoding;
 mod number_format;
 mod xlsx_stream;

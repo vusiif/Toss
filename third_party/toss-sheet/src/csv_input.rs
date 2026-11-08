@@ -1,26 +1,100 @@
-//! Bounded UTF-8 CSV/TSV input for the Toss prototype; no type inference.
+//! Bounded, strictly decoded CSV/TSV input; no type inference.
 use anyhow::{Context, Result, bail};
 use calamine::{Cell, Data, Range};
-use std::{fs::File, io::Read, path::Path};
+use encoding_rs::{Encoding, GB18030, UTF_8, UTF_16BE, UTF_16LE};
+use std::{
+    fs::File,
+    io::{Read, Seek},
+    path::Path,
+};
 const MAX_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_CELLS: usize = 2_000_000;
 const MAX_ROWS: usize = 250_000;
 const MAX_FIELD: usize = 1024 * 1024;
 
-pub fn read(path: &Path, delimiter: u8) -> Result<Range<Data>> {
+pub fn read_with_encoding(
+    path: &Path,
+    delimiter: u8,
+    requested: Option<&str>,
+) -> Result<Range<Data>> {
     if matches!(delimiter, 0 | b'\n' | b'\r' | b'"') {
         bail!("invalid CSV delimiter");
     }
-    let file = File::open(path).context("cannot open CSV")?;
+    let mut file = File::open(path).context("cannot open CSV")?;
     if file.metadata()?.len() > MAX_BYTES {
-        bail!("CSV input exceeds the prototype's 64 MiB limit");
+        bail!("CSV input exceeds the 64 MiB limit");
     }
-    let mut bounded = file.take(MAX_BYTES + 1);
-    let range = parse(&mut bounded, delimiter)?;
-    if bounded.limit() == 0 {
+    let mut head = Vec::new();
+    Read::by_ref(&mut file).take(4).read_to_end(&mut head)?;
+    if head.starts_with(&[0xff, 0xfe, 0, 0]) || head.starts_with(&[0, 0, 0xfe, 0xff]) {
+        bail!("UTF-32 CSV is unsupported");
+    }
+    let bom = if head.starts_with(&[0xff, 0xfe]) {
+        Some((UTF_16LE, 2))
+    } else if head.starts_with(&[0xfe, 0xff]) {
+        Some((UTF_16BE, 2))
+    } else if head.starts_with(&[0xef, 0xbb, 0xbf]) {
+        Some((UTF_8, 3))
+    } else {
+        None
+    };
+    let explicit = match requested {
+        None | Some("auto") => None,
+        Some("utf-8") => Some(UTF_8),
+        Some("utf-16le") => Some(UTF_16LE),
+        Some("utf-16be") => Some(UTF_16BE),
+        Some("gb18030") | Some("gbk") => Some(GB18030),
+        Some(_) => bail!("encoding must be auto, utf-8, utf-16le, utf-16be, gb18030 or gbk"),
+    };
+    if let (Some(explicit), Some((marked, _))) = (explicit, bom)
+        && explicit != marked
+    {
+        bail!("CSV BOM conflicts with the requested encoding");
+    }
+    let encoding = explicit.or(bom.map(|(e, _)| e)).unwrap_or(UTF_8);
+    let result = parse_file(&mut file, delimiter, encoding, bom.map_or(0, |(_, n)| n));
+    if explicit.is_none()
+        && bom.is_none()
+        && let Err(error) = &result
+        && error.chain().any(|e| {
+            e.downcast_ref::<csv::Error>()
+                .is_some_and(|e| matches!(e.kind(), csv::ErrorKind::Utf8 { .. }))
+        })
+    {
+        let range = parse_file(&mut file, delimiter, GB18030, 0).context(
+            "CSV is neither valid UTF-8 nor strict GB18030; specify --encoding if known",
+        )?;
+        eprintln!(
+            "CSV encoding inferred as GB18030 (UTF-8 invalid); use --encoding to choose explicitly"
+        );
+        return Ok(range);
+    }
+    result
+}
+fn parse_file(
+    file: &mut File,
+    delimiter: u8,
+    encoding: &'static Encoding,
+    bom_len: usize,
+) -> Result<Range<Data>> {
+    file.rewind()?;
+    let mut raw = Read::by_ref(file).take(MAX_BYTES + 1);
+    let result = if encoding == UTF_8 {
+        parse(&mut raw, delimiter)
+    } else {
+        let mut bom = [0; 3];
+        raw.read_exact(&mut bom[..bom_len])?;
+        let mut decoded = crate::csv_encoding::Decoded::new(&mut raw, encoding).take(MAX_BYTES + 1);
+        let result = parse(&mut decoded, delimiter);
+        if decoded.limit() == 0 {
+            bail!("decoded CSV exceeds the 64 MiB UTF-8 limit");
+        }
+        result
+    };
+    if raw.limit() == 0 {
         bail!("CSV grew beyond the 64 MiB input limit");
     }
-    Ok(range)
+    result
 }
 
 fn parse(mut source: impl Read, delimiter: u8) -> Result<Range<Data>> {
@@ -63,6 +137,11 @@ fn parse(mut source: impl Read, delimiter: u8) -> Result<Range<Data>> {
         width = width.max(record.len());
         check_shape(rows, width)?;
         for (col, field) in record.iter().enumerate() {
+            if field.contains('\0') {
+                bail!(
+                    "CSV contains NUL text; a UTF-16 file without BOM needs explicit --encoding utf-16le or utf-16be"
+                );
+            }
             if field.len() > MAX_FIELD {
                 bail!("CSV field exceeds 1 MiB");
             }

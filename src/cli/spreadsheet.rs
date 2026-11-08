@@ -17,6 +17,7 @@ pub struct SheetOptions {
     pub no_header: bool,
     pub header: bool,
     pub delimiter: Option<u8>,
+    pub encoding: Option<String>,
     pub format: SheetFormat,
 }
 pub(super) fn parse_view(args: &[OsString]) -> Result<Command, TossError> {
@@ -63,12 +64,26 @@ pub(super) fn parse_view(args: &[OsString]) -> Result<Command, TossError> {
                 options.header = true;
                 configured = true;
             }
-            "--sheet" | "--delimiter" | "--format" => {
+            "--sheet" | "--delimiter" | "--format" | "--encoding" => {
                 i += 1;
                 let value = args.get(i).and_then(|v| v.to_str()).ok_or_else(|| {
                     TossError::invalid_arguments(format!("{option} needs a UTF-8 value"))
                 })?;
                 match option {
+                    "--encoding" => {
+                        if options.encoding.is_some() {
+                            return Err(TossError::invalid_arguments("duplicate --encoding"));
+                        }
+                        let value = value.to_ascii_lowercase();
+                        if !["auto", "utf-8", "utf-16le", "utf-16be", "gb18030", "gbk"]
+                            .contains(&value.as_str())
+                        {
+                            return Err(TossError::invalid_arguments(
+                                "encoding must be auto, utf-8, utf-16le, utf-16be, gb18030 or gbk",
+                            ));
+                        }
+                        options.encoding = Some(value);
+                    }
                     "--sheet" => {
                         if options.sheet.is_some() {
                             return Err(TossError::invalid_arguments("duplicate --sheet"));
@@ -211,6 +226,9 @@ mod tests {
             vec!["x.csv", "--sheet", "A", "--sheet", "B"],
             vec!["x.csv", "--format", "csv", "--format", "json"],
             vec!["x.csv", "--unknown"],
+            vec!["x.csv", "--encoding"],
+            vec!["x.csv", "--encoding", "guess"],
+            vec!["x.csv", "--encoding", "utf-8", "--encoding", "gbk"],
         ] {
             assert!(parse(&args).is_err(), "{args:?}");
         }
@@ -224,5 +242,15 @@ mod tests {
         };
         assert!(options.header);
         assert!(!options.no_header);
+    }
+    #[test]
+    fn encoding_option_is_case_insensitive_and_does_not_change_other_options() {
+        let Command::Spreadsheet { options, .. } =
+            parse(&["x.csv", "--encoding", "UTF-16LE", "--no-header"]).unwrap()
+        else {
+            panic!("wrong command")
+        };
+        assert_eq!(options.encoding.as_deref(), Some("utf-16le"));
+        assert!(options.no_header);
     }
 }

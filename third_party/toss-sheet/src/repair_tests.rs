@@ -10,6 +10,53 @@ fn fixture(name: &str) -> std::path::PathBuf {
         .join(name)
 }
 #[test]
+fn csv_encodings_preserve_unicode_quotes_blanks_and_text_identifiers() {
+    let expected = vec![
+        vec!["", "", ""],
+        vec!["姓名", "编号", "备注"],
+        vec!["张三", "00123", "ENCODING_MARK,含逗号和\"引号\""],
+        vec!["李四", "00007", "多行\r\n中文😀"],
+        vec!["", "", ""],
+    ];
+    for name in ["utf8", "utf8-bom", "utf16le", "utf16be", "gb18030"] {
+        let mut book = Workbook::open_with_encoding(
+            fixture(&format!("encoding-{name}.csv")),
+            true,
+            None,
+            None,
+        )
+        .unwrap();
+        let sheet = book.sheet_names()[0].clone();
+        let data = book.load_sheet(&sheet).unwrap();
+        let rows: Vec<Vec<_>> = data
+            .rows
+            .iter()
+            .map(|r| r.iter().map(CellValue::to_raw_string).collect())
+            .collect();
+        assert_eq!(rows, expected, "{name}");
+    }
+    let mut book = Workbook::open_with_encoding(
+        fixture("encoding-utf16le-no-bom.csv"),
+        true,
+        None,
+        Some("utf-16le"),
+    )
+    .unwrap();
+    let sheet = book.sheet_names()[0].clone();
+    assert_eq!(
+        book.load_sheet(&sheet).unwrap().rows[2][1].to_raw_string(),
+        "00123"
+    );
+    assert!(Workbook::open(fixture("encoding-utf16le-no-bom.csv")).is_err());
+    assert!(Workbook::open(fixture("encoding-malformed-utf16.csv")).is_err());
+    assert!(Workbook::open(fixture("encoding-malformed-gb18030.csv")).is_err());
+    assert!(Workbook::open(fixture("encoding-malformed-utf8-bom.csv")).is_err());
+    assert!(
+        Workbook::open_with_encoding(fixture("encoding-utf16le.csv"), true, None, Some("utf-8"))
+            .is_err()
+    );
+}
+#[test]
 fn actual_1904_workbook_and_offset_formula() {
     let data = Workbook::open(fixture("date1904.xlsx"))
         .unwrap()

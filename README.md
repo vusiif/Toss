@@ -290,7 +290,10 @@ Redirected stdout exports only the first sheet as UTF-8 CSV, without opening the
 interactive viewer. Numeric-looking CSV fields remain strings. Formulas use
 existing cached values and can show expressions; Toss does not recalculate them.
 A missing cache displays as empty. XLSM macros are not executed. Charts and Office
-page layout are not reproduced. CSV supports UTF-8 (with optional BOM); legacy
+page layout are not reproduced. CSV/TSV supports UTF-8 (with optional BOM),
+BOM-marked UTF-16 LE/BE, and strict GB18030 fallback when unmarked UTF-8 is invalid.
+The fallback emits an inference notice; it is not reliable encoding detection.
+Malformed sequences are rejected without replacement characters. Legacy
 `.xls`, `.xlsb` and `.ods` are not yet routed to the table viewer.
 General numeric display retains the parsed value's precision without forced
 two-decimal rounding or automatic grouping. The interactive XLSX viewer supports
@@ -339,6 +342,7 @@ retains the existing first-row-as-header convention for script compatibility;
 .\toss.exe view data.xlsx --sheet "Sheet2" --format json > sheet.json
 .\toss.exe view data.csv --no-header --delimiter ";"
 .\toss.exe view data.xlsx --header
+.\toss.exe view legacy.csv --encoding gb18030
 .\toss.exe view data.xlsx --sheet "Sheet2" --format csv > sheet.csv
 ```
 
@@ -348,6 +352,10 @@ headers. `--delimiter` accepts one ASCII byte and applies only to CSV/TSV. Omit 
 for ordinary comma CSV or tab-separated TSV. Explicit `--format csv` or
 `--format json` always writes to stdout and exits, including in a terminal.
 Without an explicit format, the usual interactive/redirected behavior remains.
+`--encoding` applies only to CSV/TSV: `auto` (default), `utf-8`, `utf-16le`,
+`utf-16be`, `gb18030`, or `gbk` (the GB18030-compatible path). Explicit encoding
+must agree with any BOM. UTF-16 without a BOM requires an explicit encoding;
+NUL text is rejected. Both raw input and decoded UTF-8 are limited to 64 MiB.
 
 JSON contains `sheet`, `rows`, `columns`, `headers` and a two-dimensional `data`
 array. Numeric cells and booleans keep their JSON types; CSV text stays text,
