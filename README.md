@@ -63,6 +63,15 @@ Explicit commands are available when you want to choose the action:
 Quote paths containing spaces. Use a path such as `.\-report.docx` for a filename
 beginning with a hyphen. The advertised `hash` verb is not implemented yet.
 
+When passing multiple paths without an explicit command, Toss processes them in
+order and continues after an individual error. Per-file results and a final
+success/failure/skipped summary go to standard error; standard output keeps the
+normal file content. Unsupported operations count as skipped. Any failed or
+skipped item makes the process return the first such item's nonzero exit code,
+even if later files succeed. Existing output is never overwritten. Single-file
+behaviour and explicit commands such as `view`, `info` and `extract` retain their
+existing stop-on-error behaviour.
+
 ## Word terminal reading
 
 Terminal reading remains a core feature. It provides a lightweight view of a

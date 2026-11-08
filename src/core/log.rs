@@ -16,6 +16,11 @@ pub fn out(message: &str) {
 /// Stdout is flushed first so a report printed just before a failure is not
 /// reordered underneath the reader when the two streams are interleaved.
 pub fn error(err: impl fmt::Display) {
+    diagnostic(format_args!("Error: {err}"));
+}
+
+/// Keep progress and summaries separate from machine-readable stdout data.
+pub fn diagnostic(message: impl fmt::Display) {
     let _ = std::io::stdout().flush();
-    eprintln!("Error: {err}");
+    eprintln!("{message}");
 }

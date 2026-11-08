@@ -42,13 +42,7 @@ pub fn run(command: Command) -> Result<(), TossError> {
             log::out(&crate::cli::usage());
             Ok(())
         }
-        Command::Automatic { paths } => {
-            let inputs = resolve_inputs(&paths)?;
-            for input in &inputs {
-                route(None, input, detection::classify(input))?;
-            }
-            Ok(())
-        }
+        Command::Automatic { paths } => run_automatic(&paths),
         Command::Explicit { verb, args } => {
             let inputs = resolve_inputs(&args)?;
             for input in &inputs {
@@ -56,6 +50,57 @@ pub fn run(command: Command) -> Result<(), TossError> {
             }
             Ok(())
         }
+    }
+}
+
+fn run_automatic(paths: &[PathBuf]) -> Result<(), TossError> {
+    if paths.is_empty() {
+        return Err(TossError::invalid_arguments("no input given"));
+    }
+    // Single-file errors and output remain the original, specific contract.
+    if paths.len() == 1 {
+        let input = input::resolve(&paths[0])?;
+        return route(None, &input, detection::classify(&input));
+    }
+    let (mut succeeded, mut failed, mut skipped) = (0, 0, 0);
+    let mut first = None;
+    for path in paths {
+        let result =
+            input::resolve(path).and_then(|input| route(None, &input, detection::classify(&input)));
+        match result {
+            Ok(()) => {
+                succeeded += 1;
+                log::diagnostic(format_args!("OK: {}", path.display()));
+            }
+            Err(error) => {
+                if matches!(
+                    &error,
+                    TossError::UnsupportedFormat(_) | TossError::NotImplemented(_)
+                ) {
+                    skipped += 1;
+                    log::diagnostic(format_args!("Skipped: {}: {error}", path.display()));
+                } else {
+                    failed += 1;
+                    log::error(format_args!("{}: {error}", path.display()));
+                }
+                if first.is_none() {
+                    first = Some(Box::new(error));
+                }
+            }
+        }
+    }
+    if let Some(first) = first {
+        Err(TossError::Batch {
+            succeeded,
+            failed,
+            skipped,
+            first,
+        })
+    } else {
+        log::diagnostic(format_args!(
+            "Batch complete: {succeeded} succeeded, 0 failed, 0 skipped"
+        ));
+        Ok(())
     }
 }
 

@@ -32,6 +32,12 @@ pub enum TossError {
     /// Archive security rejections and backend diagnostics land here (§23):
     /// they must reach the user as words rather than as a bare status.
     Other(String),
+    Batch {
+        succeeded: usize,
+        failed: usize,
+        skipped: usize,
+        first: Box<TossError>,
+    },
 }
 
 impl TossError {
@@ -76,6 +82,7 @@ impl TossError {
             Self::UnsupportedFormat(_) | Self::NotImplemented(_) => ExitCode::UnsupportedFormat,
             Self::CorruptInput { .. } => ExitCode::CorruptInput,
             Self::OutputConflict(_) | Self::Io(_) | Self::Other(_) => ExitCode::Failure,
+            Self::Batch { first, .. } => first.exit_code(),
         }
     }
 }
@@ -104,6 +111,15 @@ impl fmt::Display for TossError {
             // The caller writes a whole sentence; adding a prefix here would
             // double up on the wording it chose (§23).
             Self::Other(message) => write!(f, "{message}"),
+            Self::Batch {
+                succeeded,
+                failed,
+                skipped,
+                ..
+            } => write!(
+                f,
+                "batch complete: {succeeded} succeeded, {failed} failed, {skipped} skipped"
+            ),
         }
     }
 }
@@ -112,6 +128,7 @@ impl std::error::Error for TossError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Io(err) => Some(err),
+            Self::Batch { first, .. } => Some(first.as_ref()),
             _ => None,
         }
     }
@@ -169,6 +186,23 @@ mod tests {
         for (err, expected) in cases {
             assert_eq!(err.exit_code(), expected, "wrong code for {err:?}");
         }
+    }
+    #[test]
+    fn batch_keeps_first_error_code_and_summary_without_hiding_its_source() {
+        use std::error::Error;
+        let error = TossError::Batch {
+            succeeded: 2,
+            failed: 1,
+            skipped: 1,
+            first: Box::new(TossError::UnsupportedFormat("a.png".into())),
+        };
+        assert_eq!(error.exit_code(), ExitCode::UnsupportedFormat);
+        assert!(
+            error
+                .to_string()
+                .contains("2 succeeded, 1 failed, 1 skipped")
+        );
+        assert!(error.source().unwrap().to_string().contains("a.png"));
     }
 
     #[test]
