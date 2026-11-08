@@ -525,6 +525,7 @@ impl TuiState {
         config: &crate::config::Config,
         horizontal_scroll: bool,
     ) -> Result<Self> {
+        workbook.enable_number_formats();
         let sheet_names = workbook.sheet_names();
         let current_sheet_index = sheet_names
             .iter()
@@ -714,6 +715,7 @@ impl TuiState {
         let mut cells = 0usize;
         let width = self.sheet_data.width();
         let height = self.sheet_data.height();
+        let origin = self.sheet_data.data_start();
         while width > 0
             && job.row < height
             && cells < crate::search::CELLS_PER_TICK
@@ -723,7 +725,11 @@ impl TuiState {
             if let Some(value) = rows.first().and_then(|r| r.get(job.col)) {
                 let text = match value {
                     CellValue::String(s) => std::borrow::Cow::Borrowed(s.as_str()),
-                    v => std::borrow::Cow::Owned(v.to_string()),
+                    v => std::borrow::Cow::Owned(self.workbook.display_value(
+                        origin.0 + job.row,
+                        origin.1 + job.col,
+                        v,
+                    )),
                 };
                 if job.matches(&text) {
                     self.search_matches.push((job.row, job.col));
@@ -980,11 +986,15 @@ impl TuiState {
 
         // Sample first 100 rows (or fewer if sheet is smaller)
         let sample_size = 100.min(self.sheet_data.height());
+        let origin = self.sheet_data.data_start();
         let (sample_rows, _) = self.sheet_data.get_rows(0, sample_size);
 
-        for row in sample_rows.iter() {
+        for (row_index, row) in sample_rows.iter().enumerate() {
             for (col_idx, cell) in row.iter().enumerate() {
-                let len = cell.to_string().len();
+                let len = self
+                    .workbook
+                    .display_value(origin.0 + row_index, origin.1 + col_idx, cell)
+                    .len();
                 widths[col_idx] = widths[col_idx].max(len);
             }
         }
@@ -1417,7 +1427,12 @@ impl TuiState {
                         else if is_search_match {
                             style = style.bg(colors.search_match_bg).fg(colors.search_match_fg);
                         }
-                        Cell::from(cell.to_string()).style(style)
+                        Cell::from(self.workbook.display_value(
+                            origin.0 + row_idx,
+                            origin.1 + col_idx,
+                            cell,
+                        ))
+                        .style(style)
                     })
                     .collect();
                 Row::new(cells).height(1).bottom_margin(1)
@@ -1574,7 +1589,16 @@ impl TuiState {
 
         // Status bar with current cell info
         let (cell, _) = self.sheet_data.get_cell(self.cursor_row, self.cursor_col);
-        let current_cell_value = cell.map(|v| v.to_string()).unwrap_or_default();
+        let origin = self.sheet_data.data_start();
+        let current_cell_value = cell
+            .map(|v| {
+                self.workbook.display_value(
+                    origin.0 + self.cursor_row,
+                    origin.1 + self.cursor_col,
+                    &v,
+                )
+            })
+            .unwrap_or_default();
 
         // Format sheet dimensions with scroll indicator
         let sheet_dims = if self.horizontal_scroll_enabled && self.horizontal_scroll_offset > 0 {
@@ -2070,7 +2094,12 @@ impl TuiState {
             }
 
             // Formatted display value
-            let display_value = cell.to_string();
+            let origin = self.sheet_data.data_start();
+            let display_value = self.workbook.display_value(
+                origin.0 + self.cursor_row,
+                origin.1 + self.cursor_col,
+                &cell,
+            );
             if display_value != raw_value {
                 detail_lines.push(Line::from(vec![
                     Span::styled(

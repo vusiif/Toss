@@ -72,8 +72,8 @@ struct RefColor {
     indexed: Option<usize>,
     tint: f64,
 }
-type Attrs = Vec<(String, String)>;
-fn attr<'a>(a: &'a Attrs, key: &str) -> Option<&'a str> {
+pub(crate) type Attrs = Vec<(String, String)>;
+pub(crate) fn attr<'a>(a: &'a Attrs, key: &str) -> Option<&'a str> {
     a.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
 }
 fn color(a: &Attrs) -> RefColor {
@@ -94,7 +94,7 @@ fn rgb(s: &str) -> Option<Color> {
         .ok()
         .map(|v| Color::Rgb((v >> 16) as u8, (v >> 8) as u8, v as u8))
 }
-fn xml(bytes: &[u8], mut f: impl FnMut(bool, &str, &Attrs)) -> Result<()> {
+pub(crate) fn xml(bytes: &[u8], mut f: impl FnMut(bool, &str, &Attrs)) -> Result<()> {
     let mut r = Reader::from_reader(bytes);
     r.config_mut().expand_empty_elements = true;
     let mut depth = 0usize;
@@ -137,7 +137,7 @@ fn xml(bytes: &[u8], mut f: impl FnMut(bool, &str, &Attrs)) -> Result<()> {
     }
     Ok(())
 }
-fn part(z: &mut zip::ZipArchive<Cursor<&[u8]>>, path: &str) -> Result<Vec<u8>> {
+pub(crate) fn part(z: &mut zip::ZipArchive<Cursor<&[u8]>>, path: &str) -> Result<Vec<u8>> {
     let file = match z.by_name(path) {
         Ok(f) => f,
         Err(zip::result::ZipError::FileNotFound) => return Ok(Vec::new()),

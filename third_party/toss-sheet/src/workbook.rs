@@ -1,4 +1,4 @@
-//! Toss-owned workbook access; UI and numeric formatting derive from xleak.
+//! Toss-owned workbook access; UI conventions derive from xleak.
 use anyhow::{Context, Result, anyhow};
 use calamine::{Data, ExcelDateTime, Range, Reader, Sheets, Table, open_workbook_auto_from_rs};
 use std::{io::Cursor, path::Path, sync::Arc};
@@ -15,6 +15,8 @@ pub struct Workbook {
     catalog: Option<crate::colors::Catalog>,
     // Store shared style indices, not a copy of four borders for every cell.
     cell_colors: std::collections::HashMap<(u32, u32), usize>,
+    number_catalog: Option<crate::number_format::Catalog>,
+    number_styles: crate::number_format::StyleIndices,
 }
 impl Workbook {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
@@ -45,6 +47,8 @@ impl Workbook {
                 no_header,
                 catalog: None,
                 cell_colors: Default::default(),
+                number_catalog: None,
+                number_styles: Default::default(),
             });
         }
         if delimiter.is_some() {
@@ -69,6 +73,8 @@ impl Workbook {
             no_header,
             catalog: None,
             cell_colors: Default::default(),
+            number_catalog: None,
+            number_styles: Default::default(),
         })
     }
 
@@ -79,6 +85,29 @@ impl Workbook {
                 Err(e) => eprintln!("Excel colors unavailable; using terminal theme: {e}"),
             }
         }
+    }
+    pub(crate) fn enable_number_formats(&mut self) {
+        if matches!(self.sheets, Some(Sheets::Xlsx(_))) && self.number_catalog.is_none() {
+            match crate::number_format::Catalog::load(self.source_bytes.as_ref().unwrap()) {
+                Ok(c) if c.active() => self.number_catalog = Some(c),
+                Ok(_) => {}
+                Err(e) => eprintln!("Excel number formats unavailable; showing raw values: {e}"),
+            }
+        }
+    }
+    pub(crate) fn display_value(&self, row: usize, col: usize, value: &CellValue) -> String {
+        self.number_catalog
+            .as_ref()
+            .and_then(|catalog| {
+                catalog.render(
+                    self.number_styles
+                        .get(&(row as u32, col as u32))
+                        .copied()
+                        .unwrap_or(0),
+                    value,
+                )
+            })
+            .unwrap_or_else(|| value.to_string())
     }
     pub fn uses_headers(&self) -> bool {
         !self.no_header
@@ -111,13 +140,17 @@ impl Workbook {
     }
     pub fn load_sheet_lazy(&mut self, name: &str) -> Result<LazySheetData> {
         self.cell_colors.clear();
+        self.number_styles.clear();
         let (range, formulas) = if let Some(sheets) = &mut self.sheets {
             let (range, formulas) = match sheets {
-                Sheets::Xlsx(book) => crate::xlsx_stream::load(
+                Sheets::Xlsx(book) => crate::xlsx_stream::load_formatted(
                     book,
                     name,
                     self.catalog.as_ref(),
                     &mut self.cell_colors,
+                    self.number_catalog
+                        .as_ref()
+                        .map(|c| (c, &mut self.number_styles)),
                 )?,
                 other => {
                     let range = other
@@ -141,7 +174,22 @@ impl Workbook {
             range.start().zip(range.end()),
             formulas.as_ref().and_then(|f| f.start().zip(f.end())),
         )?;
-        Ok(LazySheetData::with_shared(range, formulas, self.no_header))
+        let mut data = LazySheetData::with_shared(range.clone(), formulas, self.no_header);
+        if !self.no_header
+            && self.number_catalog.is_some()
+            && let Some(row) = data.data_start.0.checked_sub(1)
+        {
+            for (col, header) in data.headers.iter_mut().enumerate() {
+                if let Some(value) = range.get_value((row, data.data_start.1 + col as u32)) {
+                    *header = self.display_value(
+                        row as usize,
+                        data.data_start.1 as usize + col,
+                        &SheetData::datatype_to_cellvalue(value),
+                    );
+                }
+            }
+        }
+        Ok(data)
     }
     // ===== Table API (Xlsx only) =====
 
@@ -284,51 +332,8 @@ impl std::fmt::Display for CellValue {
         match self {
             CellValue::Empty => write!(f, ""),
             CellValue::String(s) => write!(f, "{s}"),
-            CellValue::Int(i) => {
-                // Format integers with thousand separators
-                let s = i.to_string();
-                let negative = s.starts_with('-');
-                let digits: String = s.trim_start_matches('-').chars().collect();
-                let mut result = String::new();
-                for (idx, ch) in digits.chars().rev().enumerate() {
-                    if idx > 0 && idx % 3 == 0 {
-                        result.push(',');
-                    }
-                    result.push(ch);
-                }
-                if negative {
-                    result.push('-');
-                }
-                write!(f, "{}", result.chars().rev().collect::<String>())
-            }
-            CellValue::Float(val) => {
-                // Format floats with thousand separators
-                let formatted = if val.fract() == 0.0 {
-                    format!("{val:.0}")
-                } else {
-                    format!("{val:.2}")
-                };
-                let parts: Vec<&str> = formatted.split('.').collect();
-                let int_part = parts[0];
-                let negative = int_part.starts_with('-');
-                let digits: String = int_part.trim_start_matches('-').chars().collect();
-                let mut result = String::new();
-                for (idx, ch) in digits.chars().rev().enumerate() {
-                    if idx > 0 && idx % 3 == 0 {
-                        result.push(',');
-                    }
-                    result.push(ch);
-                }
-                if negative {
-                    result.push('-');
-                }
-                let int_formatted: String = result.chars().rev().collect();
-                if parts.len() > 1 {
-                    write!(f, "{}.{}", int_formatted, parts[1])
-                } else {
-                    write!(f, "{}", int_formatted)
-                }
-            }
+            CellValue::Int(i) => write!(f, "{i}"),
+            CellValue::Float(value) => write!(f, "{value}"),
             CellValue::Bool(b) => {
                 // Use lowercase for booleans
                 write!(f, "{}", if *b { "true" } else { "false" })
@@ -410,30 +415,59 @@ fn format_datetime(value: &ExcelDateTime) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn general_numeric_display_preserves_precision_without_invented_grouping() {
+        for value in [
+            0.004,
+            -0.0004,
+            1.2345678901234567,
+            0.30000000000000004,
+            f64::MIN_POSITIVE,
+            f64::MAX,
+            -0.0,
+        ] {
+            let cell = super::CellValue::Float(value);
+            let display = cell.to_string();
+            assert_eq!(display.parse::<f64>().unwrap().to_bits(), value.to_bits());
+            assert!(!display.contains(','));
+            assert_eq!(
+                cell.to_raw_string().parse::<f64>().unwrap().to_bits(),
+                value.to_bits()
+            );
+        }
+        assert_eq!(
+            super::CellValue::Int(i64::MIN).to_string(),
+            i64::MIN.to_string()
+        );
+        assert_eq!(
+            super::CellValue::String("001234".into()).to_string(),
+            "001234"
+        );
+    }
     use super::*;
 
     #[test]
     fn test_cellvalue_display_integer() {
         let val = CellValue::Int(1234567);
-        assert_eq!(val.to_string(), "1,234,567");
+        assert_eq!(val.to_string(), "1234567");
     }
 
     #[test]
     fn test_cellvalue_display_negative_integer() {
         let val = CellValue::Int(-1234567);
-        assert_eq!(val.to_string(), "-1,234,567");
+        assert_eq!(val.to_string(), "-1234567");
     }
 
     #[test]
     fn test_cellvalue_display_float() {
         let val = CellValue::Float(1234567.89);
-        assert_eq!(val.to_string(), "1,234,567.89");
+        assert_eq!(val.to_string(), "1234567.89");
     }
 
     #[test]
     fn test_cellvalue_display_float_whole_number() {
         let val = CellValue::Float(1000.0);
-        assert_eq!(val.to_string(), "1,000");
+        assert_eq!(val.to_string(), "1000");
     }
 
     #[test]
@@ -478,15 +512,15 @@ mod tests {
         // (e.g. "18,441,600,422") making CSV/text output unparseable as numbers (#34)
         let val = CellValue::Float(18_441_600_422.0);
         assert_eq!(val.to_raw_string(), "18441600422");
-        // Display (TUI) formatting should still use separators
-        assert_eq!(val.to_string(), "18,441,600,422");
+        // General display must not invent grouping absent from the source format.
+        assert_eq!(val.to_string(), "18441600422");
     }
 
     #[test]
     fn test_cellvalue_to_raw_string_large_int() {
         let val = CellValue::Int(18_441_600_422);
         assert_eq!(val.to_raw_string(), "18441600422");
-        assert_eq!(val.to_string(), "18,441,600,422");
+        assert_eq!(val.to_string(), "18441600422");
     }
 
     #[test]

@@ -120,6 +120,92 @@ fn monochrome_keeps_cursor_and_search_highlights() {
 }
 
 #[test]
+fn real_numeric_cells_render_search_and_export_without_rounding() {
+    let mut workbook = Workbook::open(fixture("numeric-precision.xlsx")).unwrap();
+    let data = workbook.load_sheet("Data").unwrap();
+    let mut json = Vec::new();
+    crate::export::json(&mut json, &data, "Data").unwrap();
+    let document: serde_json::Value = serde_json::from_slice(&json).unwrap();
+    assert_eq!(document["data"][0][1].as_f64(), Some(0.004));
+    assert_eq!(document["data"][2][1].as_f64(), Some(1.2345678901234567));
+    let mut app = TuiState::new(workbook, "Data", &crate::config::Config::default(), true).unwrap();
+    let b = render(&mut app);
+    for marker in [
+        "0.004",
+        "-0.0004",
+        "1.2345678901234567",
+        "0.30000000000000004",
+        "1234567.89",
+    ] {
+        find(&b, marker);
+    }
+    app.search_query = "0.004".to_owned();
+    app.perform_search();
+    app.tick_search();
+    assert_eq!(app.search_matches, vec![(0, 1)]);
+}
+
+#[test]
+fn real_number_formats_render_search_and_switch_without_changing_raw_values() {
+    let mut workbook = Workbook::open(fixture("number-formats.xlsx")).unwrap();
+    let raw = workbook.load_sheet("Numbers").unwrap();
+    let mut before = Vec::new();
+    crate::export::json(&mut before, &raw, "Numbers").unwrap();
+    let mut app =
+        TuiState::new(workbook, "Numbers", &crate::config::Config::default(), true).unwrap();
+    let expected = [
+        "25%",
+        "12.35%",
+        "¥1,200.00",
+        "001234",
+        "(¥1,200.50)",
+        "1.23E+04",
+        "0.004",
+        "1.20",
+        "0.25",
+        "zero",
+        "0.25%",
+        "001234",
+        "25%",
+        "",
+    ];
+    let origin = app.sheet_data.data_start();
+    for (row, expected) in expected.iter().enumerate() {
+        let cell = app.sheet_data.get_cell(row, 1).0.unwrap();
+        assert_eq!(
+            app.workbook
+                .display_value(origin.0 + row, origin.1 + 1, &cell),
+            *expected
+        );
+    }
+    let b = render(&mut app);
+    find(&b, "25%");
+    find(&b, "¥1,200.00");
+    find(&b, "001234");
+    app.search_query = "¥1,200.00".to_owned();
+    app.perform_search();
+    app.tick_search();
+    assert_eq!(app.search_matches, vec![(2, 1)]);
+    app.toggle_colors().unwrap();
+    let cell = app.sheet_data.get_cell(0, 1).0.unwrap();
+    assert_eq!(cell.to_raw_string(), "0.25");
+    app.switch_to_next_sheet().unwrap();
+    let cell = app.sheet_data.get_cell(0, 1).0.unwrap();
+    assert_eq!(app.workbook.display_value(1, 1, &cell), "0.25");
+    app.switch_to_next_sheet().unwrap();
+    assert_eq!(
+        app.sheet_data.headers(),
+        &["25%".to_owned(), "001234".to_owned()]
+    );
+    let mut workbook = Workbook::open(fixture("number-formats.xlsx")).unwrap();
+    workbook.enable_number_formats();
+    let raw = workbook.load_sheet("Numbers").unwrap();
+    let mut after = Vec::new();
+    crate::export::json(&mut after, &raw, "Numbers").unwrap();
+    assert_eq!(before, after);
+}
+
+#[test]
 fn original_colors_leave_chrome_dark_and_grid_in_reserved_spacing() {
     let mut app = app("Colors", false);
     for original in [true, false] {

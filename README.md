@@ -292,6 +292,13 @@ existing cached values and can show expressions; Toss does not recalculate them.
 A missing cache displays as empty. XLSM macros are not executed. Charts and Office
 page layout are not reproduced. CSV supports UTF-8 (with optional BOM); legacy
 `.xls`, `.xlsb` and `.ods` are not yet routed to the table viewer.
+General numeric display retains the parsed value's precision without forced
+two-decimal rounding or automatic grouping. The interactive XLSX viewer supports
+common percentage, decimal-place, grouping, currency, zero-padding and scientific
+formats, including simple negative/zero sections. Unsupported conditions, fractions
+and complex accounting formats fall back to raw values; dates retain the existing
+normalized date/time display. Search follows displayed values; clipboard and
+CSV/JSON retain raw typed values.
 
 Interactive tables start with white text on a black background. Press `T` to toggle
 original Excel colors (including default black text on white), or back to black/white.

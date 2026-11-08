@@ -58,11 +58,16 @@ fn text_len(value: &DataRef<'_>) -> usize {
         _ => 0,
     }
 }
-pub fn load<R: Read + Seek>(
+type NumberStyles<'a> = (
+    &'a crate::number_format::Catalog,
+    &'a mut crate::number_format::StyleIndices,
+);
+pub fn load_formatted<R: Read + Seek>(
     book: &mut Xlsx<R>,
     name: &str,
     catalog: Option<&crate::colors::Catalog>,
     colors: &mut std::collections::HashMap<(u32, u32), usize>,
+    mut numeric: Option<NumberStyles<'_>>,
 ) -> Result<(Range<Data>, Option<Range<String>>)> {
     let mut span = Span::default();
     let mut values = Vec::new();
@@ -86,6 +91,15 @@ pub fn load<R: Read + Seek>(
                 }
             }
             let value = cell.get_value();
+            if let Some((formats, indices)) = numeric.as_mut()
+                && matches!(value, DataRef::Int(_) | DataRef::Float(_))
+            {
+                let index = reader.last_style_index().unwrap_or(0);
+                indices.insert(
+                    cell.get_position(),
+                    if formats.needs_index(index) { index } else { 0 },
+                );
+            }
             if text_len(value) > MAX_TEXT {
                 bail!("worksheet cell text exceeds 1 MiB budget");
             }
