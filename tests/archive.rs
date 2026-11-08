@@ -267,16 +267,14 @@ fn superscript_device_names_are_refused_before_any_open() {
     );
 
     let destination = scratch.path().join("windows-superscript-devices");
-    let mut names: Vec<String> = std::fs::read_dir(&destination)
-        .unwrap_or_else(|err| panic!("{}: {err}", destination.display()))
-        .flatten()
-        .map(|entry| entry.file_name().to_string_lossy().into_owned())
-        .collect();
-    names.sort();
+    assert!(
+        !destination.exists(),
+        "failed extraction must not expose partial output"
+    );
     assert_eq!(
-        names,
-        ["ok.txt"],
-        "only the control member may exist; nothing may reach a device"
+        std::fs::read_dir(scratch.path()).unwrap().count(),
+        1,
+        "only the original archive remains"
     );
 }
 
@@ -384,29 +382,19 @@ fn windows_destination_tricks_are_refused_at_the_command_line() {
         "the first hostile member must be named, got: {message}"
     );
 
-    // Only the control member landed: nothing was written to a device,
-    // nothing was renamed, no stream was created.
     let destination = scratch.path().join("hostile-windows-names");
-    let mut names: Vec<String> = std::fs::read_dir(&destination)
-        .unwrap_or_else(|err| panic!("{}: {err}", destination.display()))
-        .flatten()
-        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+    assert!(
+        !destination.exists(),
+        "failed extraction must not expose the control file either"
+    );
+    let names: Vec<_> = std::fs::read_dir(scratch.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
         .collect();
-    names.sort();
-    assert_eq!(names, ["ok.txt"], "unexpected members: {names:?}");
-
-    // And the scratch directory holds nothing but the sample and the output
-    // root — the refusal happened before any syscall touched the disk.
-    let mut beside: Vec<String> = std::fs::read_dir(scratch.path())
-        .expect("scratch readable")
-        .flatten()
-        .map(|entry| entry.file_name().to_string_lossy().into_owned())
-        .collect();
-    beside.sort();
     assert_eq!(
-        beside,
-        ["hostile-windows-names", "hostile-windows-names.zip"],
-        "something else was written beside the output root: {beside:?}"
+        names,
+        [std::ffi::OsString::from("hostile-windows-names.zip")],
+        "no staging residue or device output"
     );
 }
 

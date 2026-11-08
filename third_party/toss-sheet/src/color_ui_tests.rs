@@ -1,0 +1,269 @@
+use super::*;
+use ratatui::{backend::TestBackend, buffer::Buffer, style::Color};
+fn fixture(name: &str) -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
+        .join(name)
+}
+fn app(sheet: &str, no_header: bool) -> TuiState {
+    let mut app = TuiState::new(
+        Workbook::open_with_options(fixture("colors.xlsx"), no_header, None).unwrap(),
+        sheet,
+        &crate::config::Config::default(),
+        true,
+    )
+    .unwrap();
+    app.excel_colors = true;
+    app
+}
+fn render(app: &mut TuiState) -> Buffer {
+    let mut terminal = Terminal::new(TestBackend::new(150, 30)).unwrap();
+    terminal.draw(|f| app.render(f)).unwrap();
+    terminal.backend().buffer().clone()
+}
+fn find(b: &Buffer, marker: &str) -> (u16, u16) {
+    for y in 0..b.area.height {
+        for x in 0..b.area.width.saturating_sub(marker.len() as u16) {
+            if marker
+                .chars()
+                .enumerate()
+                .all(|(i, c)| b[(x + i as u16, y)].symbol() == c.to_string())
+            {
+                return (x, y);
+            }
+        }
+    }
+    panic!("marker missing: {marker}");
+}
+fn expect(b: &Buffer, marker: &str, fg: Color, bg: Color) {
+    let p = find(b, marker);
+    for dx in 0..marker.len() as u16 {
+        let c = &b[(p.0 + dx, p.1)];
+        assert_eq!((c.fg, c.bg), (fg, bg), "{marker}");
+    }
+}
+#[test]
+fn starts_monochrome_and_key_toggle_restores_exact_excel_colors() {
+    let mut app = TuiState::new(
+        Workbook::open(fixture("colors.xlsx")).unwrap(),
+        "Colors",
+        &crate::config::Config::default(),
+        true,
+    )
+    .unwrap();
+    assert!(!app.excel_colors);
+    let b = render(&mut app);
+    for marker in [
+        "RGB_MARK",
+        "THEME_MARK",
+        "INDEX_MARK",
+        "PLAIN_MARK",
+        "EXCEL_COLOR",
+    ] {
+        expect(&b, marker, Color::White, Color::Black);
+    }
+    find(&b, "T:Excel colors");
+    let press = |app: &mut TuiState, c, mods| {
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(c), mods)))
+    };
+    press(&mut app, 't', crossterm::event::KeyModifiers::NONE);
+    assert!(app.excel_colors);
+    let b = render(&mut app);
+    expect(
+        &b,
+        "RGB_MARK",
+        Color::Rgb(192, 0, 0),
+        Color::Rgb(255, 242, 204),
+    );
+    expect(
+        &b,
+        "PLAIN_MARK",
+        Color::Rgb(0, 0, 0),
+        Color::Rgb(255, 255, 255),
+    );
+    find(&b, "T:Black/white");
+    app.switch_to_next_sheet().unwrap();
+    assert!(app.excel_colors);
+    press(&mut app, 'T', crossterm::event::KeyModifiers::SHIFT);
+    assert!(!app.excel_colors);
+    let b = render(&mut app);
+    expect(&b, "RGB_MARK", Color::White, Color::Black);
+    press(&mut app, '/', crossterm::event::KeyModifiers::NONE);
+    press(&mut app, 't', crossterm::event::KeyModifiers::NONE);
+    assert_eq!(app.search_query, "t");
+    assert!(!app.excel_colors);
+}
+
+#[test]
+fn monochrome_keeps_cursor_and_search_highlights() {
+    let mut app = app("Colors", false);
+    app.excel_colors = false;
+    app.cursor_col = 1;
+    app.search_matches = vec![(1, 1)];
+    app.current_match_index = Some(0);
+    let colors = app.current_theme.colors();
+    let b = render(&mut app);
+    expect(
+        &b,
+        "RGB_MARK",
+        colors.current_cell_fg,
+        colors.current_cell_bg,
+    );
+    expect(
+        &b,
+        "THEME_MARK",
+        colors.current_search_fg,
+        colors.current_search_bg,
+    );
+    expect(&b, "PLAIN_MARK", Color::White, Color::Black);
+}
+
+#[test]
+fn original_colors_leave_chrome_dark_and_grid_in_reserved_spacing() {
+    let mut app = app("Colors", false);
+    for original in [true, false] {
+        app.excel_colors = original;
+        let b = render(&mut app);
+        expect(&b, "Colors (Sheet 1/3)", Color::White, Color::Black);
+        assert_eq!(b[(0, 0)].fg, Color::White);
+        assert_eq!(b[(0, 0)].bg, Color::Black);
+        assert_eq!(b[(140, 20)].bg, Color::Black);
+        let (x, y) = find(&b, "RGB_MARK");
+        assert_eq!(b[(x - 1, y)].symbol(), "│");
+        assert_eq!(b[(x, y + 1)].symbol(), "─");
+        assert_eq!(b[(x - 1, y + 1)].symbol(), "┼");
+        assert_eq!(b[(x - 1, y)].bg, Color::Black);
+        assert_ne!(b[(x - 1, y)].fg, b[(x - 1, y)].bg);
+    }
+}
+
+#[test]
+fn grid_keeps_scrolled_cursor_visible_in_small_viewports() {
+    let mut app = app("Colors", false);
+    app.cursor_row = 4;
+    app.cursor_col = 1;
+    let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
+    terminal.draw(|f| app.render(f)).unwrap();
+    assert!(app.scroll_offset > 0);
+    expect(
+        terminal.backend().buffer(),
+        "PLAIN_MARK",
+        app.current_theme.colors().current_cell_fg,
+        app.current_theme.colors().current_cell_bg,
+    );
+    for size in [(1, 1), (6, 5), (20, 8)] {
+        let mut terminal = Terminal::new(TestBackend::new(size.0, size.1)).unwrap();
+        terminal.draw(|f| app.render(f)).unwrap();
+    }
+}
+#[test]
+fn actual_rgb_theme_indexed_blank_header_and_default() {
+    let mut app = app("Colors", false);
+    let b = render(&mut app);
+    expect(
+        &b,
+        "RGB_MARK",
+        Color::Rgb(192, 0, 0),
+        Color::Rgb(255, 242, 204),
+    );
+    expect(
+        &b,
+        "THEME_MARK",
+        Color::Rgb(55, 96, 146),
+        Color::Rgb(149, 179, 215),
+    );
+    expect(
+        &b,
+        "INDEX_MARK",
+        Color::Rgb(0, 0, 255),
+        Color::Rgb(255, 255, 0),
+    );
+    expect(
+        &b,
+        "PLAIN_MARK",
+        Color::Rgb(0, 0, 0),
+        Color::Rgb(255, 255, 255),
+    );
+    expect(
+        &b,
+        "EXCEL_COLOR",
+        Color::Rgb(255, 255, 255),
+        Color::Rgb(36, 64, 98),
+    );
+    let (x, _) = find(&b, "RGB_MARK");
+    let (_, y) = find(&b, "BLANK");
+    assert_eq!(b[(x, y)].bg, Color::Rgb(0, 255, 0));
+}
+#[test]
+fn cursor_and_search_remain_readable_over_original_colors() {
+    let mut app = app("Colors", false);
+    app.cursor_col = 1;
+    let b = render(&mut app);
+    let c = app.current_theme.colors();
+    expect(&b, "RGB_MARK", c.current_cell_fg, c.current_cell_bg);
+    app.search_matches = vec![(0, 1), (1, 1)];
+    app.current_match_index = Some(1);
+    let b = render(&mut app);
+    expect(&b, "RGB_MARK", c.current_cell_fg, c.current_cell_bg);
+    expect(&b, "THEME_MARK", c.current_search_fg, c.current_search_bg);
+    app.cursor_col = 0;
+    let b = render(&mut app);
+    expect(&b, "RGB_MARK", c.search_match_fg, c.search_match_bg);
+}
+#[test]
+fn switching_sheets_replaces_styles_and_offset_no_header_coordinates() {
+    let mut app = app("Colors", false);
+    app.switch_to_next_sheet().unwrap();
+    let b = render(&mut app);
+    expect(
+        &b,
+        "RGB_MARK",
+        Color::Rgb(255, 255, 255),
+        Color::Rgb(128, 0, 128),
+    );
+    app.switch_to_next_sheet().unwrap();
+    app.cursor_col = 1;
+    let b = render(&mut app);
+    expect(
+        &b,
+        "OFFSET_MARK",
+        Color::Rgb(192, 0, 0),
+        Color::Rgb(255, 242, 204),
+    );
+    let mut app = super::color_ui_tests::app("Offset", true);
+    app.cursor_col = 1;
+    let b = render(&mut app);
+    expect(
+        &b,
+        "OFFSET_MARK",
+        Color::Rgb(192, 0, 0),
+        Color::Rgb(255, 242, 204),
+    );
+}
+#[test]
+fn custom_palette_exports_untouched_and_csv_no_colors() {
+    let mut w = Workbook::open(fixture("colors-custom.xlsx")).unwrap();
+    assert!(w.color_at(3, 1).is_none());
+    let before = w.load_sheet("Colors").unwrap().rows[2][1].to_raw_string();
+    w.enable_colors();
+    w.load_sheet("Colors").unwrap();
+    let c = w.color_at(3, 1).unwrap();
+    assert_eq!(c.fg, Color::Rgb(18, 52, 86));
+    assert_eq!(c.bg, Color::Rgb(101, 67, 33));
+    assert_eq!(before, "INDEX_MARK");
+    let mut csv = Workbook::open(fixture("edge.csv")).unwrap();
+    csv.enable_colors();
+    assert!(csv.color_at(0, 0).is_none());
+}
+#[test]
+fn invalid_or_oversized_theme_metadata_falls_back_without_losing_data() {
+    for name in ["colors-invalid.xlsx", "colors-large-style.xlsx"] {
+        let mut w = Workbook::open(fixture(name)).unwrap();
+        w.enable_colors();
+        assert!(w.color_at(1, 1).is_none());
+        assert_eq!(
+            w.load_sheet("Colors").unwrap().rows[0][1].to_raw_string(),
+            "RGB_MARK"
+        );
+    }
+}

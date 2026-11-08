@@ -155,3 +155,35 @@ fn legacy_doc_picture_and_text_box_content_through_cli() {
     }
     std::fs::remove_dir_all(temp).unwrap();
 }
+
+#[test]
+fn redirected_doc_images_need_no_writable_temp_directory() {
+    let temp = tempfile_for_test("text-no-temp");
+    let path = temp.join("pictures.doc");
+    // The shared fixture constructor builds a genuine CFB/Word picture stream.
+    let png = doxx::image::RgbaImage::from_pixel(2, 2, doxx::image::Rgba([1, 2, 3, 255]));
+    let mut encoded = Vec::new();
+    png.write_to(
+        &mut Cursor::new(&mut encoded),
+        doxx::image::ImageFormat::Png,
+    )
+    .unwrap();
+    std::fs::write(&path, fixtures::images_doc(&[encoded])).unwrap();
+    let unavailable = temp.join("absent").join("temp");
+    let output = Command::new(env!("CARGO_BIN_EXE_toss"))
+        .arg(&path)
+        .env("TMP", &unavailable)
+        .env("TEMP", &unavailable)
+        .env("TMPDIR", &unavailable)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(text.contains("[Image]") && text.contains("BEFORE") && text.contains("AFTER_0"));
+    assert!(!unavailable.exists());
+    std::fs::remove_dir_all(temp).unwrap();
+}

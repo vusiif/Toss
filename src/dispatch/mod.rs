@@ -23,6 +23,21 @@ use crate::detection::{self, Kind};
 /// Run a parsed command to completion.
 pub fn run(command: Command) -> Result<(), TossError> {
     match command {
+        Command::Spreadsheet { path, options } => {
+            let input = input::resolve(&path)?;
+            if detection::classify(&input) != Kind::Spreadsheet {
+                return Err(TossError::invalid_arguments(
+                    "spreadsheet options require an XLSX, XLSM, CSV or TSV file",
+                ));
+            }
+            crate::handlers::spreadsheet::view_with_options(input.path(), options)
+        }
+        Command::Extract { paths, options } => {
+            for input in resolve_inputs(&paths)? {
+                crate::handlers::archive::extract_with_options(input.path(), options)?;
+            }
+            Ok(())
+        }
         Command::Help => {
             log::out(&crate::cli::usage());
             Ok(())
@@ -97,6 +112,7 @@ fn route(verb: Option<Verb>, input: &Input, kind: Kind) -> Result<(), TossError>
             Kind::Image | Kind::Directory => crate::handlers::image::view(input.path()),
             Kind::Document => crate::handlers::word::view(input.path()),
             Kind::Pdf => crate::handlers::pdf::view(input.path()),
+            Kind::Spreadsheet => crate::handlers::spreadsheet::view(input.path()),
             _ => Err(TossError::UnsupportedFormat(input.path().to_path_buf())),
         },
 
@@ -132,6 +148,7 @@ fn route(verb: Option<Verb>, input: &Input, kind: Kind) -> Result<(), TossError>
             // `toss report.docx` — §18.5's default action for a Word document.
             Kind::Document => crate::handlers::word::view(input.path()),
             Kind::Pdf => crate::handlers::pdf::view(input.path()),
+            Kind::Spreadsheet => crate::handlers::spreadsheet::view(input.path()),
 
             // Everything else still has no handler: describe the input, then
             // say which default action is missing (§7, §5).

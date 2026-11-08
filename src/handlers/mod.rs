@@ -25,6 +25,7 @@ pub mod directory;
 pub mod image;
 pub mod media;
 pub mod pdf;
+pub mod spreadsheet;
 pub mod word;
 
 /// Turn a backend failure into something Toss can report (§23).
@@ -36,6 +37,9 @@ pub mod word;
 /// extraction only knows what went wrong.
 pub(crate) fn translate(err: ArchiveError, path: &Path) -> TossError {
     match err {
+        ArchiveError::BudgetExceeded(context) => {
+            TossError::other(format!("archive extraction limit exceeded: {context}"))
+        }
         ArchiveError::UnsupportedFormat => TossError::UnsupportedFormat(path.to_path_buf()),
         ArchiveError::CorruptArchive(context) => TossError::CorruptInput {
             path: path.to_path_buf(),

@@ -12,6 +12,7 @@
 //! arrives with Phase 5 (§46), which reuses this same abstraction rather
 //! than inventing a second one.
 
+pub mod budget;
 pub mod policy;
 pub mod types;
 
@@ -39,6 +40,16 @@ pub trait ArchiveBackend {
     /// Enumerate entries before extracting anything, so problems surface on
     /// a safer, read-only surface first (§45 step 5).
     fn list(&self, input: &ArchiveInput) -> Result<Vec<ArchiveEntry>, ArchiveError>;
+
+    fn summary(
+        &self,
+        _input: &ArchiveInput,
+        _limits: budget::ExtractionLimits,
+    ) -> Result<budget::ArchiveSummary, ArchiveError> {
+        Err(ArchiveError::BackendFailure(
+            "bounded archive preflight is unavailable".into(),
+        ))
+    }
 
     /// Extract into a destination Toss has already chosen and validated.
     fn extract(&self, request: &ExtractRequest) -> Result<ExtractResult, ArchiveError>;
@@ -142,6 +153,9 @@ pub fn router() -> ArchiveRouter {
 impl std::fmt::Display for ArchiveError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::BudgetExceeded(context) => {
+                write!(f, "archive extraction limit exceeded: {context}")
+            }
             Self::UnsupportedFormat => write!(f, "not a readable archive"),
             Self::CorruptArchive(context) => {
                 write!(f, "archive is corrupted or incomplete: {context}")

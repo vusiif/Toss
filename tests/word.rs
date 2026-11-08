@@ -723,3 +723,262 @@ fn layout_cache_bounds_entries_bytes_and_invalidates_style() {
     }
     assert!(cache.get(1, 40).is_some());
 }
+#[cfg(feature = "word")]
+mod search_reliability {
+    use doxx::ratatui::{Terminal, backend::TestBackend, style::Color};
+    use doxx::{App, AppOptions, document::*};
+    fn paragraph(text: &str) -> DocumentElement {
+        DocumentElement::Paragraph {
+            runs: vec![FormattedRun {
+                text: text.into(),
+                formatting: TextFormatting::default(),
+            }],
+        }
+    }
+    fn document(elements: Vec<DocumentElement>) -> Document {
+        Document {
+            title: "search".into(),
+            metadata: DocumentMetadata {
+                file_path: "search.docx".into(),
+                file_size: 0,
+                word_count: 0,
+                page_count: 1,
+                created: None,
+                modified: None,
+                author: None,
+            },
+            elements,
+            image_options: ImageOptions::default(),
+            image_session: None,
+        }
+    }
+    #[test]
+    fn repeated_unicode_matches_keep_original_byte_offsets_and_share_text() {
+        let doc = document(vec![paragraph("İx ERROR 中文🙂 error Σ σ ς")]);
+        let hits = search_document(&doc, "error");
+        assert_eq!(hits.len(), 2);
+        assert!(std::sync::Arc::ptr_eq(&hits[0].text, &hits[1].text));
+        for hit in &hits {
+            assert_eq!(
+                hit.text
+                    .get(hit.start_pos..hit.end_pos)
+                    .unwrap()
+                    .to_ascii_lowercase(),
+                "error"
+            );
+        }
+        let hit = &search_document(&doc, "x")[0];
+        assert_eq!((hit.start_pos, hit.end_pos), (2, 3));
+        assert_eq!(search_document(&doc, "σ").len(), 3);
+        let hit = &search_document(&doc, "中文🙂")[0];
+        assert_eq!(&hit.text[hit.start_pos..hit.end_pos], "中文🙂");
+    }
+    #[test]
+    fn all_matches_include_run_boundaries_lists_and_table_cells() {
+        let mut doc = document(vec![paragraph("ER")]);
+        if let DocumentElement::Paragraph { runs } = &mut doc.elements[0] {
+            runs.push(FormattedRun {
+                text: "ROR error".into(),
+                formatting: TextFormatting::default(),
+            });
+        }
+        let item = ListItem {
+            runs: vec![FormattedRun {
+                text: "error error".into(),
+                formatting: TextFormatting::default(),
+            }],
+            level: 0,
+        };
+        doc.elements.push(DocumentElement::List {
+            items: vec![item],
+            ordered: false,
+        });
+        let cell = TableCell {
+            content: "error error".into(),
+            alignment: TextAlignment::Left,
+            formatting: TextFormatting::default(),
+            data_type: CellDataType::Text,
+        };
+        doc.elements.push(DocumentElement::Table {
+            table: TableData {
+                headers: vec![],
+                rows: vec![vec![cell]],
+                metadata: TableMetadata {
+                    column_count: 1,
+                    row_count: 1,
+                    has_headers: false,
+                    column_widths: vec![20],
+                    column_alignments: vec![TextAlignment::Left],
+                    title: None,
+                },
+            },
+        });
+        let hits = search_document(&doc, "error");
+        assert_eq!(hits.len(), 6);
+        for hit in hits {
+            assert_eq!(
+                hit.text
+                    .get(hit.start_pos..hit.end_pos)
+                    .unwrap()
+                    .to_ascii_lowercase(),
+                "error"
+            );
+        }
+    }
+    #[test]
+    fn match_budget_is_reported_without_a_copy_per_match() {
+        let doc = document(vec![paragraph(&"error ".repeat(10_000))]);
+        let report = search_document_with_status(&doc, "error");
+        assert_eq!(report.results.len(), MAX_SEARCH_RESULTS);
+        assert!(report.limited);
+        assert!(
+            report
+                .results
+                .iter()
+                .all(|hit| std::sync::Arc::ptr_eq(&hit.text, &report.results[0].text))
+        );
+        assert!(
+            search_document_with_status(&doc, &"a".repeat(MAX_SEARCH_QUERY_BYTES + 1))
+                .error
+                .is_some()
+        );
+        let mut app = App::new(doc, &AppOptions::default());
+        app.search_query = "error".into();
+        app.refresh_search();
+        assert!(
+            app.status_message
+                .as_deref()
+                .unwrap()
+                .contains("Search limit reached")
+        );
+    }
+    #[test]
+    fn paragraph_navigation_scrolls_to_each_match_and_highlights_original_unicode() {
+        let doc = document(vec![paragraph(&format!(
+            "İ 中文🙂 {}TARGET {}target",
+            "padding ".repeat(30),
+            "between ".repeat(30)
+        ))]);
+        let mut app = App::new(doc, &AppOptions::default());
+        let mut terminal = Terminal::new(TestBackend::new(24, 10)).unwrap();
+        terminal
+            .draw(|frame| doxx::ui::render_document(frame, frame.area(), &mut app))
+            .unwrap();
+        app.search_query = "target".into();
+        app.refresh_search();
+        assert_eq!(app.search_results.len(), 2);
+        app.current_search_index = 1;
+        app.next_search_result();
+        let first = app.page_line_offset;
+        assert!(first > 0);
+        terminal
+            .draw(|frame| doxx::ui::render_document(frame, frame.area(), &mut app))
+            .unwrap();
+        assert!(
+            terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .any(|cell| cell.bg == Color::Yellow)
+        );
+        app.next_search_result();
+        assert!(app.page_line_offset > first);
+        terminal
+            .draw(|frame| doxx::ui::render_document(frame, frame.area(), &mut app))
+            .unwrap();
+        assert!(
+            terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .any(|cell| cell.bg == Color::Yellow)
+        );
+        app.prev_search_result();
+        assert_eq!(app.page_line_offset, first);
+    }
+    #[test]
+    fn current_match_has_a_distinct_highlight_after_unicode_prefix() {
+        let mut app = App::new(
+            document(vec![paragraph("İ target target")]),
+            &AppOptions::default(),
+        );
+        app.search_query = "target".into();
+        app.refresh_search();
+        let mut terminal = Terminal::new(TestBackend::new(40, 8)).unwrap();
+        terminal
+            .draw(|frame| doxx::ui::render_document(frame, frame.area(), &mut app))
+            .unwrap();
+        let cells = &terminal.backend().buffer().content;
+        assert_eq!(
+            cells.iter().filter(|cell| cell.bg == Color::Yellow).count(),
+            6
+        );
+        assert_eq!(
+            cells
+                .iter()
+                .filter(|cell| cell.bg == Color::Indexed(240))
+                .count(),
+            6
+        );
+    }
+    #[test]
+    fn table_search_navigation_reaches_the_selected_row() {
+        let cell = |text: String| TableCell {
+            content: text,
+            alignment: TextAlignment::Left,
+            formatting: TextFormatting::default(),
+            data_type: CellDataType::Text,
+        };
+        let element = DocumentElement::Table {
+            table: TableData {
+                headers: vec![],
+                rows: (0..40)
+                    .map(|row| {
+                        vec![cell(if row == 39 {
+                            "needle".into()
+                        } else {
+                            format!("row {row}")
+                        })]
+                    })
+                    .collect(),
+                metadata: TableMetadata {
+                    column_count: 1,
+                    row_count: 40,
+                    has_headers: false,
+                    column_widths: vec![20],
+                    column_alignments: vec![TextAlignment::Left],
+                    title: None,
+                },
+            },
+        };
+        let mut app = App::new(document(vec![element]), &AppOptions::default());
+        let mut terminal = Terminal::new(TestBackend::new(30, 10)).unwrap();
+        terminal
+            .draw(|frame| doxx::ui::render_document(frame, frame.area(), &mut app))
+            .unwrap();
+        app.search_query = "needle".into();
+        app.refresh_search();
+        app.next_search_result();
+        assert!(app.page_line_offset >= 39);
+        terminal
+            .draw(|frame| doxx::ui::render_document(frame, frame.area(), &mut app))
+            .unwrap();
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("needle"));
+    }
+    #[test]
+    fn oversized_matching_source_text_reports_the_retention_limit() {
+        let doc = document(vec![paragraph(&"x".repeat(MAX_SEARCH_TEXT_BYTES + 1))]);
+        let outcome = search_document_with_status(&doc, "x");
+        assert!(outcome.limited);
+        assert!(outcome.results.is_empty());
+    }
+}

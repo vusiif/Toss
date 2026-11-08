@@ -111,6 +111,7 @@ pub struct ArchiveProbe {
 pub struct ExtractRequest {
     pub input: ArchiveInput,
     pub output_root: PathBuf,
+    pub limits: super::budget::ExtractionLimits,
 }
 
 /// What an extraction did.
@@ -180,6 +181,7 @@ pub struct ArchiveCapabilities {
 /// — §23 asks for no speculative variants.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ArchiveError {
+    BudgetExceeded(String),
     /// The input is not an archive Toss can read.
     UnsupportedFormat,
     /// The archive is damaged, with the backend's own words kept for context.

@@ -21,6 +21,21 @@ fn corrupt(path: &Path, message: impl Into<String>) -> TossError {
 }
 
 pub(super) fn load(path: &Path, image_options: ImageOptions) -> Result<Document, TossError> {
+    load_with_retention(path, image_options, true)
+}
+
+pub(super) fn load_for_text(
+    path: &Path,
+    image_options: ImageOptions,
+) -> Result<Document, TossError> {
+    load_with_retention(path, image_options, false)
+}
+
+fn load_with_retention(
+    path: &Path,
+    image_options: ImageOptions,
+    retain_images: bool,
+) -> Result<Document, TossError> {
     let file = File::open(path).map_err(|e| TossError::from_io(path, e))?;
     let mut bytes = Vec::new();
     file.take(MAX_FILE_BYTES + 1)
@@ -48,7 +63,7 @@ pub(super) fn load(path: &Path, image_options: ImageOptions) -> Result<Document,
         _ => corrupt(path, format!("invalid legacy DOC: {e}")),
     })?;
     let model = source.model();
-    let mut converter = Converter::new(image_options.enabled);
+    let mut converter = Converter::new(image_options.enabled, retain_images);
     let mut elements = Vec::new();
     for (index, block) in model.blocks.iter().enumerate() {
         for region in model
@@ -122,6 +137,7 @@ fn formatting(props: &rwml::CharProps) -> TextFormatting {
 struct Converter {
     text_remaining: usize,
     images_enabled: bool,
+    retain_images: bool,
     images: Option<doxx::image_extractor::ImageExtractor>,
     image_count: usize,
     image_bytes: usize,
@@ -152,10 +168,11 @@ impl ConversionError {
 }
 
 impl Converter {
-    fn new(images_enabled: bool) -> Self {
+    fn new(images_enabled: bool, retain_images: bool) -> Self {
         Self {
             text_remaining: MAX_TEXT_BYTES,
             images_enabled,
+            retain_images,
             images: None,
             image_count: 0,
             image_bytes: 0,
@@ -199,6 +216,16 @@ impl Converter {
         {
             return Ok(unavailable("encoded image total limit exceeded"));
         }
+        self.image_bytes += bytes.len();
+        if !self.retain_images {
+            return Ok(DocumentElement::Image {
+                description: format!("DOC image {}", ordinal + 1),
+                width: image.width_px,
+                height: image.height_px,
+                relationship_id: None,
+                image_path: None,
+            });
+        }
         if self.images.is_none() {
             self.images = Some(
                 doxx::image_extractor::ImageExtractor::new().map_err(ConversionError::Storage)?,
@@ -209,7 +236,6 @@ impl Converter {
         let path = extractor
             .store_embedded_image(&id, bytes, extension)
             .map_err(ConversionError::Storage)?;
-        self.image_bytes += bytes.len();
         Ok(DocumentElement::Image {
             description: format!("DOC image {}", ordinal + 1),
             width: image.width_px,
@@ -543,6 +569,36 @@ mod tests {
     }
 
     #[test]
+    fn text_loading_keeps_placeholders_without_an_image_session() {
+        let bytes = fixtures::images_doc(&[png(2, 2, [1, 2, 3, 255]), jpeg()]);
+        let file = input(&bytes);
+        let options = ImageOptions {
+            enabled: true,
+            ..Default::default()
+        };
+        let interactive = load(file.path(), options.clone()).unwrap();
+        let text = load_for_text(file.path(), options).unwrap();
+        assert!(text.image_session.is_none());
+        assert_eq!(
+            plain_elements(&text.elements),
+            plain_elements(&interactive.elements)
+        );
+        assert_eq!(
+            text.elements
+                .iter()
+                .filter(|element| matches!(
+                    element,
+                    DocumentElement::Image {
+                        image_path: None,
+                        ..
+                    }
+                ))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
     fn unsupported_corrupt_and_oversized_pictures_preserve_doc_text() {
         for bytes in [
             b"unsupported WMF picture".to_vec(),
@@ -598,7 +654,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        let mut converter = Converter::new(true);
+        let mut converter = Converter::new(true, true);
         let elements = converter.blocks(&[rwml::Block::Table(table)], 0).unwrap();
         assert_eq!(
             elements
@@ -644,7 +700,7 @@ mod tests {
             ..Default::default()
         };
         let size = picture.bytes.as_ref().unwrap().len();
-        let mut converter = Converter::new(true);
+        let mut converter = Converter::new(true, true);
         converter.limits.max_single_image_size = (size - 1) as u64;
         let rejected = converter.image(&picture).unwrap();
         assert!(plain_elements(&[rejected]).contains("byte limit exceeded"));

@@ -32,6 +32,7 @@ pub enum Kind {
     Media,
     Document,
     Pdf,
+    Spreadsheet,
     Unknown,
 }
 
@@ -48,6 +49,7 @@ impl Kind {
             Self::Media => Some("media playback"),
             Self::Document => Some("document viewing"),
             Self::Pdf => Some("PDF viewing"),
+            Self::Spreadsheet => Some("spreadsheet viewing"),
             Self::Unknown => None,
         }
     }
@@ -61,6 +63,7 @@ impl Kind {
             Self::Media => "media",
             Self::Document => "document",
             Self::Pdf => "PDF",
+            Self::Spreadsheet => "spreadsheet",
             Self::Unknown => "unknown",
         }
     }
@@ -104,6 +107,7 @@ fn kind_from_extension(path: &Path) -> Option<Kind> {
         // Word documents (WORD_VIEWER.md §4.C)
         "docx" | "doc" => Some(Kind::Document),
         "pdf" => Some(Kind::Pdf),
+        "xlsx" | "xlsm" | "csv" | "tsv" => Some(Kind::Spreadsheet),
         _ => None,
     }
 }
@@ -230,6 +234,10 @@ mod tests {
             ("a.doc", Kind::Document),
             ("a.DOC", Kind::Document),
             ("a.PDF", Kind::Pdf),
+            ("a.XLSX", Kind::Spreadsheet),
+            ("a.xlsm", Kind::Spreadsheet),
+            ("a.csv", Kind::Spreadsheet),
+            ("a.TSV", Kind::Spreadsheet),
         ];
 
         for (name, expected) in cases {

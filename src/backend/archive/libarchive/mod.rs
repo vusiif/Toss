@@ -50,6 +50,14 @@ impl ArchiveBackend for LibarchiveBackend {
         Reader::list(input.primary())
     }
 
+    fn summary(
+        &self,
+        input: &ArchiveInput,
+        limits: super::budget::ExtractionLimits,
+    ) -> Result<super::budget::ArchiveSummary, ArchiveError> {
+        Reader::summary(input.primary(), limits)
+    }
+
     fn extract(&self, request: &ExtractRequest) -> Result<ExtractResult, ArchiveError> {
         Reader::extract(request)
     }

@@ -77,7 +77,9 @@ jobs:
 
       - name: Formatting
         shell: bash
-        run: cargo fmt --check
+        run: |
+          cargo fmt --check
+          cargo fmt --manifest-path third_party/toss-sheet/Cargo.toml --check
 
       - name: Clippy
         shell: bash
@@ -86,6 +88,13 @@ jobs:
       - name: Tests
         shell: bash
         run: cargo test --locked --all-features
+
+      - name: Spreadsheet library checks
+        shell: bash
+        run: |
+          cargo clippy --manifest-path third_party/toss-sheet/Cargo.toml --locked --all-targets -- -D warnings
+          cargo test --manifest-path third_party/toss-sheet/Cargo.toml --locked --lib
+          cargo test --locked --no-default-features --test spreadsheet
 
       # Everything below is Windows-only. toss.exe is the product, so the
       # release build, the CLI behaviour it exercises and the size it records

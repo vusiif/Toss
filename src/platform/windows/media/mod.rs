@@ -5,6 +5,7 @@
 //! session is kept alive* (Phase 7's `MEDIA_PLAYBACK.md` §7 — raw MF stays
 //! behind the wrapper, and every `unsafe` of the phase lives there).
 
+mod audio;
 mod backend;
 mod player;
 // Slice 2's presentation path, and Slice 3's terminal fallback (design

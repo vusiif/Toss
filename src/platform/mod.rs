@@ -18,3 +18,9 @@ pub mod portable;
 
 #[cfg(target_os = "windows")]
 pub mod windows;
+
+#[cfg(feature = "archive")]
+pub mod archive_fs;
+
+#[cfg(feature = "spreadsheet")]
+pub mod console;

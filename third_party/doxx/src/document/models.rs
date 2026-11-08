@@ -175,10 +175,11 @@ pub enum CellDataType {
 #[derive(Debug, Clone)]
 pub struct SearchResult {
     pub element_index: usize,
-    pub text: String,
-    #[allow(dead_code)]
+    pub text: std::sync::Arc<str>,
+    /// Segment within an element (list item or table cell); zero for plain text.
+    pub part_index: usize,
+    /// Byte offsets in the original segment, never in a lowercased copy.
     pub start_pos: usize,
-    #[allow(dead_code)]
     pub end_pos: usize,
 }
 

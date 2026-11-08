@@ -89,31 +89,23 @@ impl Writer {
         size: u64,
         modified: Option<(i64, c_long)>,
     ) -> Result<u64, ArchiveError> {
+        if size > i64::MAX as u64 {
+            return Err(ArchiveError::BackendFailure(format!(
+                "{relative:?}: file is too large for an archive entry"
+            )));
+        }
         self.add_member(relative, Some(size), false, modified)?;
-
-        let mut buffer = vec![0_u8; 64 * 1024];
-        let mut written = 0_u64;
-
-        loop {
-            let read = stream
-                .read(&mut buffer)
-                .map_err(|err| ArchiveError::BackendFailure(format!("{relative:?}: {err}")))?;
-            if read == 0 {
-                break;
-            }
-
-            // SAFETY: `self.inner` is a live writer and `buffer` holds
-            // `read` valid bytes for the duration of the call.
+        stream_member(relative, stream, size, |bytes| {
+            // SAFETY: `self.inner` is a live writer and `bytes` is valid
+            // for the duration of the call.
             let code = unsafe {
-                raw::archive_write_data(self.inner.as_ptr(), buffer.as_ptr().cast(), read)
+                raw::archive_write_data(self.inner.as_ptr(), bytes.as_ptr().cast(), bytes.len())
             };
             if code < 0 {
                 return Err(self.write_failure(code, "write data"));
             }
-            written += code as u64;
-        }
-
-        Ok(written)
+            Ok(code as usize)
+        })
     }
 
     /// Flush and close the archive.
@@ -158,7 +150,7 @@ impl Writer {
     ) -> Result<(), ArchiveError> {
         let read = std::fs::read_dir(directory).map_err(|err| io_failure(directory, &err))?;
 
-        let mut children: Vec<_> = read.flatten().collect();
+        let mut children = collect_entries(directory, read)?;
         children.sort_by_key(|entry| entry.file_name());
 
         for child in children {
@@ -388,6 +380,60 @@ fn modified_from(metadata: &std::fs::Metadata) -> Option<(i64, c_long)> {
     ))
 }
 
+/// Read every directory entry, preserving mid-iteration errors and context.
+fn collect_entries<T>(
+    directory: &Path,
+    entries: impl IntoIterator<Item = std::io::Result<T>>,
+) -> Result<Vec<T>, ArchiveError> {
+    entries
+        .into_iter()
+        .collect::<std::io::Result<Vec<_>>>()
+        .map_err(|err| io_failure(directory, &err))
+}
+
+/// The header declares an exact length. Never let the backend silently truncate
+/// growing input or pad shrinking input; neither is a successful backup.
+fn stream_member(
+    relative: &Path,
+    stream: &mut dyn Read,
+    size: u64,
+    mut write: impl FnMut(&[u8]) -> Result<usize, ArchiveError>,
+) -> Result<u64, ArchiveError> {
+    let mut buffer = vec![0_u8; 64 * 1024];
+    let mut total = 0_u64;
+    loop {
+        let count = match stream.read(&mut buffer) {
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+            result => result.map_err(|err| io_failure(relative, &err))?,
+        };
+        if count == 0 {
+            if total != size {
+                return Err(ArchiveError::BackendFailure(format!(
+                    "{relative:?}: source length changed (expected {size} bytes, read {total})"
+                )));
+            }
+            return Ok(total);
+        }
+        if count as u64 > size - total {
+            return Err(ArchiveError::BackendFailure(format!(
+                "{relative:?}: source grew beyond its declared length of {size} bytes"
+            )));
+        }
+        let mut pending = &buffer[..count];
+        while !pending.is_empty() {
+            let written = write(pending)?;
+            if written == 0 || written > pending.len() {
+                return Err(ArchiveError::BackendFailure(format!(
+                    "{relative:?}: archive writer returned invalid progress ({written} of {} bytes)",
+                    pending.len()
+                )));
+            }
+            pending = &pending[written..];
+        }
+        total += count as u64; // Bounded by size before writing.
+    }
+}
+
 /// An IO failure during the walk, phrased as the archive error §23 asks for.
 ///
 /// Permission problems get their own variant because §24 gives them their own
@@ -414,5 +460,86 @@ unsafe fn error_string(archive: *mut raw::Archive) -> String {
             return String::new();
         }
         CStr::from_ptr(text).to_string_lossy().into_owned()
+    }
+}
+
+#[cfg(test)]
+mod reliability_tests {
+    use super::*;
+    use std::io::{Cursor, Error, ErrorKind};
+
+    #[test]
+    fn iteration_error_is_not_a_skipped_entry() {
+        let entries = [
+            Ok("first"),
+            Err(Error::other("injected directory failure")),
+            Ok("last"),
+        ];
+        let err = collect_entries(Path::new("source-directory"), entries).unwrap_err();
+        assert!(format!("{err:?}").contains("source-directory"));
+        assert!(format!("{err:?}").contains("injected directory failure"));
+        assert!(matches!(
+            collect_entries::<()>(
+                Path::new("denied"),
+                [Err(Error::from(ErrorKind::PermissionDenied))]
+            ),
+            Err(ArchiveError::PermissionDenied(_))
+        ));
+    }
+
+    #[test]
+    fn partial_writes_preserve_every_byte_and_zero_progress_fails() {
+        let bytes = vec![42; 70_001];
+        let mut output = Vec::new();
+        let count = stream_member(
+            Path::new("member"),
+            &mut Cursor::new(&bytes),
+            bytes.len() as u64,
+            |chunk| {
+                let count = chunk.len().min(2048);
+                output.extend_from_slice(&chunk[..count]);
+                Ok(count)
+            },
+        )
+        .unwrap();
+        assert_eq!(count, bytes.len() as u64);
+        assert_eq!(output, bytes);
+        for progress in [0, 2] {
+            assert!(
+                stream_member(Path::new("member"), &mut Cursor::new(b"x"), 1, |_| Ok(
+                    progress
+                ))
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn shrinking_and_growing_sources_are_refused() {
+        assert!(
+            stream_member(Path::new("member"), &mut Cursor::new(b"short"), 6, |b| Ok(
+                b.len()
+            ))
+            .is_err()
+        );
+        let mut written = 0;
+        assert!(
+            stream_member(Path::new("member"), &mut Cursor::new(b"longer"), 5, |b| {
+                written += b.len();
+                Ok(b.len())
+            })
+            .is_err()
+        );
+        assert_eq!(
+            written, 0,
+            "do not submit bytes exceeding the declared length"
+        );
+        assert_eq!(
+            stream_member(Path::new("empty"), &mut Cursor::new(b""), 0, |_| panic!(
+                "empty write"
+            ))
+            .unwrap(),
+            0
+        );
     }
 }

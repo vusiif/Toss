@@ -352,7 +352,11 @@ fn entry_name_attempt(rng: &mut Rng, scratch: &Path, index: usize, label: &str) 
     beside.sort();
     assert_eq!(
         beside,
-        [OsString::from("entry"), OsString::from("entry.zip")],
+        if output.status.success() {
+            vec![OsString::from("entry"), OsString::from("entry.zip")]
+        } else {
+            vec![OsString::from("entry.zip")]
+        },
         "{label} entry {index} ({name:?}): something escaped or was written beside the output root: {beside:?}"
     );
 }

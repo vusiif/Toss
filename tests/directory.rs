@@ -220,3 +220,108 @@ fn packing_twice_leaves_the_first_archive_alone() {
         "the existing archive was modified"
     );
 }
+#[test]
+fn concurrent_packers_publish_only_one_complete_archive() {
+    use std::process::Stdio;
+    let scratch = Scratch::new("concurrent-staged");
+    let source = scratch.path().join("source");
+    write(&source.join("hello.txt"), b"unchanged input");
+    let spawn = || {
+        Command::new(env!("CARGO_BIN_EXE_toss"))
+            .arg("pack")
+            .arg(&source)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap()
+    };
+    let first = spawn();
+    let second = spawn();
+    let results = [
+        first.wait_with_output().unwrap(),
+        second.wait_with_output().unwrap(),
+    ];
+    assert_eq!(
+        results
+            .iter()
+            .filter(|result| result.status.success())
+            .count(),
+        1
+    );
+    let archive = scratch.path().join("source.7z");
+    assert!(archive.is_file());
+    assert!(!std::fs::read_dir(scratch.path()).unwrap().any(|entry| {
+        entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".toss-pack-")
+    }));
+    let check = scratch.path().join("check.7z");
+    std::fs::copy(&archive, &check).unwrap();
+    assert_succeeded(
+        &toss(&[Path::new("extract"), &check]),
+        "verify committed archive",
+    );
+    assert_eq!(tree(&source), tree(&scratch.path().join("check")));
+}
+
+#[test]
+fn an_existing_empty_output_directory_is_a_conflict_not_a_replacement() {
+    let scratch = Scratch::new("staged-output-directory");
+    let source = scratch.path().join("source");
+    write(&source.join("hello.txt"), b"unchanged");
+    let target = scratch.path().join("source.7z");
+    std::fs::create_dir(&target).unwrap();
+    let result = toss(&[Path::new("pack"), &source]);
+    assert!(!result.status.success());
+    assert!(target.is_dir());
+    assert_eq!(std::fs::read_dir(&target).unwrap().count(), 0);
+}
+#[test]
+fn an_empty_source_directory_still_produces_a_valid_nonempty_archive() {
+    let scratch = Scratch::new("empty-staged");
+    let source = scratch.path().join("empty");
+    std::fs::create_dir(&source).unwrap();
+    assert_succeeded(&toss(&[Path::new("pack"), &source]), "pack empty directory");
+    let archive = scratch.path().join("empty.7z");
+    assert!(std::fs::metadata(&archive).unwrap().len() > 0);
+    std::fs::remove_dir(&source).unwrap();
+    assert_succeeded(
+        &toss(&[Path::new("extract"), &archive]),
+        "read empty directory archive",
+    );
+    assert!(source.is_dir());
+    assert_eq!(std::fs::read_dir(&source).unwrap().count(), 0);
+}
+#[cfg(windows)]
+#[test]
+fn a_real_locked_source_file_leaves_no_partial_archive_or_staging() {
+    use std::{io::Write, os::windows::fs::OpenOptionsExt};
+    let scratch = Scratch::new("locked-staged");
+    let source = scratch.path().join("source");
+    std::fs::create_dir(&source).unwrap();
+    let path = source.join("locked.txt");
+    let mut locked = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .share_mode(0)
+        .open(&path)
+        .unwrap();
+    locked.write_all(b"original input").unwrap();
+    locked.flush().unwrap();
+    let output = toss(&[Path::new("pack"), &source]);
+    assert!(!output.status.success());
+    assert!(!scratch.path().join("source.7z").exists());
+    assert!(!std::fs::read_dir(scratch.path()).unwrap().any(|entry| {
+        entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".toss-pack-")
+    }));
+    drop(locked);
+    assert_eq!(std::fs::read(path).unwrap(), b"original input");
+}

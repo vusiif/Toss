@@ -49,7 +49,11 @@ pub fn view(path: &Path) -> Result<(), TossError> {
             .extension()
             .is_some_and(|ext| ext.eq_ignore_ascii_case("doc"))
         {
-            legacy::load(path, image_options)?
+            if interactive {
+                legacy::load(path, image_options)?
+            } else {
+                legacy::load_for_text(path, image_options)?
+            }
         } else if !interactive {
             doxx::document::load_document_for_text(path)
                 .map_err(|err| translate_doxx_error(err, path))?

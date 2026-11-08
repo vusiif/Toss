@@ -1,0 +1,213 @@
+--- calamine-0.34.0/src/xlsx/cells_reader.rs
++++ toss-calamine/src/xlsx/cells_reader.rs
+@@ -61,6 +61,7 @@
+     dimensions: Dimensions,
+     row_index: u32,
+     col_index: u32,
++    last_style_index: Option<usize>,
+     buf: Vec<u8>,
+     cell_buf: Vec<u8>,
+     value_bufs: ValueBufs,
+@@ -122,6 +123,7 @@
+             dimensions,
+             row_index: 0,
+             col_index: 0,
++            last_style_index: None,
+             buf: Vec::with_capacity(1024),
+             cell_buf: Vec::with_capacity(1024),
+             value_bufs: ValueBufs::new(),
+@@ -129,6 +131,8 @@
+         })
+     }
+ 
++    pub fn last_style_index(&self) -> Option<usize> { self.last_style_index }
++
+     pub fn dimensions(&self) -> Dimensions {
+         self.dimensions
+     }
+@@ -166,6 +170,7 @@
+                             _ => {}
+                         }
+                     }
++                    self.last_style_index = style_attr.and_then(|v| std::str::from_utf8(v).ok()).and_then(|v| v.parse().ok());
+                     let pos = if let Some(range) = pos_attr {
+                         let (row, col) = get_row_column(range)?;
+                         self.col_index = col;
+@@ -426,6 +431,11 @@
+             }
+         }
+         None => {
++            // An absent type defaults to numeric. An empty <v> is not an
++            // explicitly cached empty string (which uses t="str").
++            if v.is_empty() {
++                return Ok(DataRef::Empty);
++            }
+             // If type is not known, we try to parse as Float for utility, but fall back to
+             // String if this fails.
+             fast_float2::parse::<f64, _>(v.as_bytes())
+--- calamine-0.34.0/src/xlsx/mod.rs
++++ toss-calamine/src/xlsx/mod.rs
+@@ -397,7 +397,10 @@
+         Ok(())
+     }
+ 
+-    fn read_workbook(&mut self, relationships: &HashMap<Vec<u8>, String>) -> Result<(), XlsxError> {
++    fn read_workbook(
++        &mut self,
++        relationships: &HashMap<Vec<u8>, (String, Option<SheetType>)>,
++    ) -> Result<(), XlsxError> {
+         let mut xml = match xml_reader(&mut self.zip, "xl/workbook.xml", &self.zip_path_cache) {
+             None => return Ok(()),
+             Some(x) => x?,
+@@ -411,6 +414,7 @@
+                 Ok(Event::Start(e)) if e.local_name().as_ref() == b"sheet" => {
+                     let mut name = String::new();
+                     let mut path = String::new();
++                    let mut relationship_type = None;
+                     let mut visible = SheetVisible::Visible;
+                     for a in e.attributes() {
+                         let a = a?;
+@@ -442,32 +446,28 @@
+                                 key: QName(b"r:id" | b"relationships:id"),
+                                 value: v,
+                             } => {
+-                                let r = &relationships
++                                let (target, typ) = relationships
+                                     .get(&*v)
+-                                    .ok_or(XlsxError::RelationshipNotFound)?[..];
+-                                // target may have prepended "/xl/" or "xl/" path;
+-                                // strip if present
+-                                path = if r.starts_with("/xl/") {
+-                                    r[1..].to_string()
+-                                } else if r.starts_with("xl/") {
+-                                    r.to_string()
+-                                } else {
+-                                    format!("xl/{r}")
+-                                };
++                                    .ok_or(XlsxError::RelationshipNotFound)?;
++                                path = resolve_sheet_target(target)?;
++                                relationship_type = *typ;
+                             }
+                             _ => (),
+                         }
+                     }
+-                    let typ = match path.split('/').nth(1) {
+-                        Some("worksheets") => SheetType::WorkSheet,
+-                        Some("chartsheets") => SheetType::ChartSheet,
+-                        Some("dialogsheets") => SheetType::DialogSheet,
+-                        _ => {
+-                            return Err(XlsxError::Unrecognized {
+-                                typ: "sheet:type",
+-                                val: path.to_string(),
+-                            })
+-                        }
++                    let typ = match relationship_type {
++                        Some(typ) => typ,
++                        None => match path.split('/').nth(1) {
++                            Some("worksheets") => SheetType::WorkSheet,
++                            Some("chartsheets") => SheetType::ChartSheet,
++                            Some("dialogsheets") => SheetType::DialogSheet,
++                            _ => {
++                                return Err(XlsxError::Unrecognized {
++                                    typ: "sheet:type",
++                                    val: path.to_string(),
++                                })
++                            }
++                        },
+                     };
+                     self.metadata.sheets.push(Sheet {
+                         name: name.to_string(),
+@@ -517,7 +517,9 @@
+         Ok(())
+     }
+ 
+-    fn read_relationships(&mut self) -> Result<HashMap<Vec<u8>, String>, XlsxError> {
++    fn read_relationships(
++        &mut self,
++    ) -> Result<HashMap<Vec<u8>, (String, Option<SheetType>)>, XlsxError> {
+         let mut xml = match xml_reader(
+             &mut self.zip,
+             "xl/_rels/workbook.xml.rels",
+@@ -538,6 +540,7 @@
+                 Ok(Event::Start(e)) if e.local_name().as_ref() == b"Relationship" => {
+                     let mut id = Vec::new();
+                     let mut target = String::new();
++                    let mut typ = None;
+                     for a in e.attributes() {
+                         match a? {
+                             Attribute {
+@@ -545,13 +548,27 @@
+                                 value: v,
+                             } => id.extend_from_slice(&v),
+                             Attribute {
++                                key: QName(b"Type"),
++                                value: v,
++                            } => {
++                                typ = match v.as_ref() {
++                                    b"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet"
++                                    | b"http://purl.oclc.org/ooxml/officeDocument/relationships/worksheet" => Some(SheetType::WorkSheet),
++                                    b"http://schemas.openxmlformats.org/officeDocument/2006/relationships/chartsheet"
++                                    | b"http://purl.oclc.org/ooxml/officeDocument/relationships/chartsheet" => Some(SheetType::ChartSheet),
++                                    b"http://schemas.openxmlformats.org/officeDocument/2006/relationships/dialogsheet"
++                                    | b"http://purl.oclc.org/ooxml/officeDocument/relationships/dialogsheet" => Some(SheetType::DialogSheet),
++                                    _ => None,
++                                };
++                            }
++                            Attribute {
+                                 key: QName(b"Target"),
+                                 value: v,
+                             } => target = xml.decoder().decode(&v)?.into_owned(),
+                             _ => (),
+                         }
+                     }
+-                    relationships.insert(id, target);
++                    relationships.insert(id, (target, typ));
+                 }
+                 Ok(Event::End(e)) if e.local_name().as_ref() == b"Relationships" => break,
+                 Ok(Event::Eof) => return Err(XlsxError::XmlEof("Relationships")),
+@@ -1575,7 +1592,7 @@
+             .find(|&(n, _)| n == name)
+             .ok_or_else(|| XlsxError::WorksheetNotFound(name.into()))?;
+         let xml = xml_reader(&mut self.zip, path, &self.zip_path_cache)
+-            .ok_or_else(|| XlsxError::WorksheetNotFound(name.into()))??;
++            .ok_or_else(|| XlsxError::FileNotFound(path.to_owned()))??;
+         let is_1904 = self.is_1904;
+         let strings = &self.strings;
+         let formats = &self.formats;
+@@ -1583,6 +1600,36 @@
+     }
+ }
+ 
++// Toss evaluation patch: resolve from xl/workbook.xml, within package root.
++fn resolve_sheet_target(target: &str) -> Result<String, XlsxError> {
++    let invalid = || XlsxError::Unrecognized {
++        typ: "sheet:target",
++        val: target.to_owned(),
++    };
++    if target.contains(['\\', ':', '?', '#', '\0']) {
++        return Err(invalid());
++    }
++    // Preserve calamine's existing acceptance of xl/-prefixed package paths.
++    let mut parts = if target.starts_with('/') || target.starts_with("xl/") {
++        Vec::new()
++    } else {
++        vec!["xl"]
++    };
++    for part in target.split('/') {
++        match part {
++            "" | "." => (),
++            ".." => {
++                parts.pop().ok_or_else(invalid)?;
++            }
++            _ => parts.push(part),
++        }
++    }
++    if parts.is_empty() {
++        return Err(invalid());
++    }
++    Ok(parts.join("/"))
++}
++
+ impl<RS: Read + Seek> Reader<RS> for Xlsx<RS> {
+     type Error = XlsxError;
+ 

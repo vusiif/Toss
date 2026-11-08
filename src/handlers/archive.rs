@@ -7,60 +7,162 @@
 
 use std::path::{Path, PathBuf};
 
+#[cfg(feature = "archive")]
 use crate::backend::archive::{self, ArchiveFormat, ArchiveInput, ExtractRequest};
 use crate::core::error::TossError;
+#[cfg(feature = "archive")]
 use crate::core::log;
 
 /// Extract `archive` beside itself: `foo.7z` becomes `foo/` (§21).
 pub fn extract(archive: &Path) -> Result<(), TossError> {
-    let destination = output_root(archive);
+    extract_with_options(archive, crate::cli::ExtractOptions::default())
+}
 
-    // §27: automatic mode never replaces what the user might already have.
-    if destination.exists() {
-        return Err(TossError::OutputConflict(destination));
+pub fn extract_with_options(
+    archive: &Path,
+    options: crate::cli::ExtractOptions,
+) -> Result<(), TossError> {
+    #[cfg(not(feature = "archive"))]
+    {
+        let _ = (archive, options);
+        Err(TossError::not_implemented("archive extraction"))
     }
+    #[cfg(feature = "archive")]
+    {
+        use crate::backend::archive::budget::space_required;
+        let destination = output_root(archive);
+        let parent = destination
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        let parent =
+            std::fs::canonicalize(parent).map_err(|err| TossError::from_io(parent, err))?;
+        let destination = parent.join(
+            destination
+                .file_name()
+                .ok_or_else(|| TossError::invalid_arguments("archive has no output name"))?,
+        );
+        match std::fs::symlink_metadata(&destination) {
+            Ok(_) => return Err(TossError::OutputConflict(destination)),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(TossError::from_io(&destination, err)),
+        }
+        let router = archive::router();
+        let backend = router
+            .select(ArchiveFormat::Unknown, false)
+            .ok_or_else(|| TossError::not_implemented("archive extraction"))?;
+        let input = ArchiveInput::single(archive.to_path_buf());
+        let summary = backend
+            .summary(&input, options.limits)
+            .map_err(|err| super::translate(err, archive))?;
+        let disk = crate::platform::archive_fs::disk_space(&parent);
+        let required = disk
+            .as_ref()
+            .ok()
+            .and_then(|disk| space_required(summary, disk.allocation_unit, options.reserve_bytes));
+        let risk = match (required, disk.as_ref().ok()) {
+            (Some(required), Some(disk)) if required <= disk.available => None,
+            (Some(required), Some(disk)) => Some(format!(
+                "Estimated output plus reserve: {required} bytes; target volume available: {} bytes.",
+                disk.available
+            )),
+            _ => Some(format!(
+                "Cannot reliably estimate disk requirements: {} declared bytes, {} regular files with unknown sizes. {}",
+                summary.declared_bytes,
+                summary.unknown_sizes,
+                disk.as_ref()
+                    .err()
+                    .map(|err| format!("Space query failed: {err}."))
+                    .unwrap_or_default()
+            )),
+        };
+        if let Some(risk) = risk {
+            eprintln!(
+                "Warning: {risk} Extraction may exhaust disk space. Hard output limits remain active."
+            );
+            if !options.accept_space_risk {
+                confirm_space_risk()?;
+            }
+        }
+        // Same-volume staging: no second full copy at commit. TempDir owns only
+        // this newly created unique directory; never clean the final target.
+        let stage = tempfile::Builder::new()
+            .prefix(".toss-extract-")
+            .tempdir_in(&parent)
+            .map_err(|err| TossError::from_io(&parent, err))?;
+        let request = ExtractRequest {
+            input,
+            output_root: stage.path().to_path_buf(),
+            limits: options.limits,
+        };
+        let result = backend
+            .extract(&request)
+            .map_err(|err| super::translate(err, archive))
+            .and_then(|result| {
+                crate::platform::archive_fs::rename_no_replace(stage.path(), &destination)
+                    .map_err(|err| {
+                        if std::fs::symlink_metadata(&destination).is_ok() {
+                            TossError::OutputConflict(destination.clone())
+                        } else {
+                            TossError::from_io(&destination, err)
+                        }
+                    })?;
+                Ok(result)
+            });
+        match result {
+            Ok(result) => {
+                let _ = stage.keep();
+                log::out(&format!(
+                    "Extracted {} entries to {}",
+                    result.entries,
+                    destination.display()
+                ));
+                if result.skipped > 0 {
+                    log::out(&format!(
+                        "Skipped {} entries: links, devices and special files are not restored",
+                        result.skipped
+                    ));
+                }
+                Ok(())
+            }
+            Err(err) => {
+                let residual = stage.path().to_path_buf();
+                if let Err(cleanup) = stage.close() {
+                    return Err(TossError::other(format!(
+                        "{err}; could not remove this operation's temporary output {}: {cleanup}",
+                        residual.display()
+                    )));
+                }
+                Err(err)
+            }
+        }
+    }
+}
 
-    // Created up front so the promised directory exists even for an archive
-    // with no members. An empty directory left behind by a later failure is
-    // untidy but harmless; refusing to start would be worse.
-    std::fs::create_dir_all(&destination).map_err(|err| match err.kind() {
-        std::io::ErrorKind::PermissionDenied => TossError::PermissionDenied(destination.clone()),
-        _ => TossError::other(format!("cannot create {}: {err}", destination.display())),
-    })?;
-
-    let request = ExtractRequest {
-        input: ArchiveInput::single(archive.to_path_buf()),
-        output_root: destination.clone(),
-    };
-
-    // The router is built here rather than in dispatch so that the handler
-    // remains the only thing that knows an archive is being extracted (§9),
-    // and so the single `cfg(feature = "archive")` stays in `backend/` (§12).
-    let router = archive::router();
-    let backend = router
-        .select(ArchiveFormat::Unknown, false)
-        .ok_or_else(|| TossError::not_implemented("archive extraction"))?;
-
-    let result = backend
-        .extract(&request)
-        .map_err(|err| super::translate(err, archive))?;
-
-    log::out(&format!(
-        "Extracted {} entries to {}",
-        result.entries,
-        destination.display()
-    ));
-
-    // §17: reported rather than omitted, so a user who expected a symlink
-    // learns that Toss chose not to create it.
-    if result.skipped > 0 {
-        log::out(&format!(
-            "Skipped {} entries: links, devices and special files are not restored",
-            result.skipped
+#[cfg(feature = "archive")]
+fn confirm_space_risk() -> Result<(), TossError> {
+    use std::io::{BufRead, IsTerminal, Read, Write};
+    let stdin = std::io::stdin();
+    if !stdin.is_terminal() {
+        return Err(TossError::other(
+            "space risk requires an interactive confirmation; use extract --accept-space-risk to explicitly accept it (hard limits still apply)",
         ));
     }
-
-    Ok(())
+    eprint!("Continue? [y/N] ");
+    std::io::stderr().flush().map_err(TossError::Io)?;
+    let mut answer = Vec::new();
+    stdin
+        .lock()
+        .take(16)
+        .read_until(b'\n', &mut answer)
+        .map_err(TossError::Io)?;
+    if answer.ends_with(b"\n") && answer.trim_ascii().eq_ignore_ascii_case(b"y") {
+        Ok(())
+    } else {
+        Err(TossError::other(
+            "extraction cancelled before output was created",
+        ))
+    }
 }
 
 /// `foo.7z` to `foo`, next to the archive (§21).
@@ -72,6 +174,7 @@ pub fn extract(archive: &Path) -> Result<(), TossError> {
 /// A file with no extension at all — recognised by its contents rather than
 /// by a suffix — would otherwise strip down to its own name and collide with
 /// the input, so it gets a deterministic suffix instead of a failure.
+#[cfg_attr(not(feature = "archive"), allow(dead_code))]
 fn output_root(archive: &Path) -> PathBuf {
     let Some(file_name) = archive.file_name() else {
         return archive.to_path_buf();

@@ -21,7 +21,7 @@ strip = "debuginfo"
 [features]
 default = []
 
-archive = []
+archive = ["dep:tempfile", "dep:libc"]
 # Enables the Windows image viewer, and with it the `windows` dependency
 # below. The feature is empty on non-Windows targets because that dependency
 # cannot be built there at all (IMAGE_VIEWER.md §3).
@@ -30,9 +30,10 @@ image = ["dep:windows"]
 # reasoning as `image` (MEDIA_PLAYBACK.md §5): a build without it never
 # hears of `windows` for this purpose, and everywhere else the capability
 # answers exit 3 with the refusal Toss gives for what it was not built with.
-media = ["dep:windows"]
+media = ["dep:windows", "windows/Win32_System_Console"]
 inspect = []
 hash = []
+spreadsheet = ["dep:toss-sheet"]
 # Enables Word document viewing via vendored doxx (WORD_VIEWER.md §3, §4.C).
 word = ["dep:doxx", "dep:rwml", "dep:cfb"]
 # PDF pages share the native raster viewer; no external PDF application needed.
@@ -52,9 +53,12 @@ full = [
     "word",
     "pdf",
     "word-pdf",
+    "spreadsheet",
 ]
 
 [dependencies]
+toss-sheet = { path = "third_party/toss-sheet", optional = true }
+tempfile = { version = "3", optional = true }
 doxx = { path = "third_party/doxx", optional = true }
 rwml = { version = "=0.1.4", default-features = false, optional = true }
 cfb = { version = "0.10", optional = true }
@@ -95,6 +99,14 @@ windows = { version = "0.62", optional = true, features = [
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Shell_PropertiesSystem",
 ] }
+
+[target.'cfg(unix)'.dependencies]
+libc = { version = "0.2", optional = true }
+
+# Test the actual structured stdout with the same mature JSON parser already
+# present in the runtime dependency graph; no extra runtime dependency.
+[dev-dependencies]
+serde_json = "1"
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "warn"

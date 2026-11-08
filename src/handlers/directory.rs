@@ -34,14 +34,11 @@ pub fn compress(directory: &Path) -> Result<(), TossError> {
 
     // §27: automatic mode never replaces what the user might already have —
     // including an archive left behind by an earlier run of this same command.
-    if output.exists() {
-        return Err(TossError::OutputConflict(output));
+    match std::fs::symlink_metadata(&output) {
+        Ok(_) => return Err(TossError::OutputConflict(output)),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => return Err(TossError::from_io(&output, err)),
     }
-
-    let request = CreateRequest {
-        source: directory.to_path_buf(),
-        output: output.clone(),
-    };
 
     // The router is built here rather than in dispatch so that the handler
     // remains the only thing that knows a directory is being packed, and so
@@ -51,8 +48,14 @@ pub fn compress(directory: &Path) -> Result<(), TossError> {
         .select(ArchiveFormat::SevenZip, true)
         .ok_or_else(|| TossError::not_implemented("directory compression"))?;
 
+    #[cfg(feature = "archive")]
+    let result = create_staged(directory, &output, |request| backend.create(request))?;
+    #[cfg(not(feature = "archive"))]
     let result = backend
-        .create(&request)
+        .create(&CreateRequest {
+            source: directory.to_path_buf(),
+            output: output.clone(),
+        })
         .map_err(|err| super::translate(err, directory))?;
 
     log::out(&format!(
@@ -72,6 +75,91 @@ pub fn compress(directory: &Path) -> Result<(), TossError> {
     }
 
     Ok(())
+}
+
+/// Publish a completely closed archive without replacing a concurrent output.
+/// The backend only sees a fresh path in an operation-owned sibling directory.
+#[cfg(feature = "archive")]
+fn create_staged(
+    directory: &Path,
+    output: &Path,
+    create: impl FnOnce(&CreateRequest) -> Result<archive::CreateResult, archive::ArchiveError>,
+) -> Result<archive::CreateResult, TossError> {
+    let source =
+        std::fs::canonicalize(directory).map_err(|err| TossError::from_io(directory, err))?;
+    let parent = output
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let parent = std::fs::canonicalize(parent).map_err(|err| TossError::from_io(parent, err))?;
+    // A selected directory link can resolve to an ancestor of its apparent
+    // parent. Never create staging/output inside the tree being compressed.
+    if parent.starts_with(&source) {
+        return Err(TossError::invalid_arguments(
+            "archive output would be inside the source directory",
+        ));
+    }
+    let target = parent.join(
+        output
+            .file_name()
+            .ok_or_else(|| TossError::invalid_arguments("archive has no output name"))?,
+    );
+    let stage = tempfile::Builder::new()
+        .prefix(".toss-pack-")
+        .tempdir_in(&parent)
+        .map_err(|err| TossError::from_io(&parent, err))?;
+    let request = CreateRequest {
+        source,
+        output: stage.path().join("archive.7z"),
+    };
+    let result = create(&request)
+        .map_err(|err| super::translate(err, directory))
+        .and_then(|result| {
+            let metadata = std::fs::symlink_metadata(&request.output)
+                .map_err(|err| TossError::from_io(&request.output, err))?;
+            if !metadata.is_file()
+                || metadata.file_type().is_symlink()
+                || metadata.len() == 0
+                || metadata.len() != result.bytes_written
+            {
+                return Err(TossError::other(
+                    "archive backend did not finish a regular output of the reported length",
+                ));
+            }
+            crate::platform::archive_fs::rename_no_replace(&request.output, &target).map_err(
+                |err| {
+                    if std::fs::symlink_metadata(&target).is_ok() {
+                        TossError::OutputConflict(target.clone())
+                    } else {
+                        TossError::from_io(&target, err)
+                    }
+                },
+            )?;
+            Ok(result)
+        });
+    let residual = stage.path().to_path_buf();
+    match result {
+        Ok(result) => {
+            // The final archive is already committed. Cleanup failure must not
+            // turn that successful publication into a misleading failure.
+            if let Err(err) = stage.close() {
+                eprintln!(
+                    "Warning: archive was created, but temporary directory {} could not be removed: {err}",
+                    residual.display()
+                );
+            }
+            Ok(result)
+        }
+        Err(err) => {
+            if let Err(cleanup) = stage.close() {
+                return Err(TossError::other(format!(
+                    "{err}; could not remove this operation's temporary output {}: {cleanup}",
+                    residual.display()
+                )));
+            }
+            Err(err)
+        }
+    }
 }
 
 /// `hello/` beside itself as `hello.7z` (§26).
@@ -208,5 +296,94 @@ mod tests {
             b"not really an archive",
             "the existing file was touched"
         );
+    }
+}
+#[cfg(all(test, feature = "archive"))]
+mod staging_tests {
+    use super::*;
+    use archive::{ArchiveError, CreateResult};
+    fn fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let parent =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join(".sandbox-test/pack-staging-20261102/unit");
+        std::fs::create_dir_all(&parent).unwrap();
+        let root = tempfile::tempdir_in(parent).unwrap();
+        let source = root.path().join("source");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::write(source.join("original"), b"keep").unwrap();
+        let output = root.path().join("source.7z");
+        (root, source, output)
+    }
+    fn no_stage(root: &Path) {
+        assert!(!std::fs::read_dir(root).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".toss-pack-")
+        }));
+    }
+    #[test]
+    fn partial_backend_failure_cleans_owned_output_without_publishing() {
+        let (root, source, output) = fixture();
+        let error = create_staged(&source, &output, |request| {
+            std::fs::write(&request.output, b"partial").unwrap();
+            assert!(!output.exists());
+            Err(ArchiveError::BackendFailure(
+                "injected mid-pack failure".into(),
+            ))
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("injected mid-pack failure"));
+        assert!(!output.exists());
+        assert_eq!(std::fs::read(source.join("original")).unwrap(), b"keep");
+        no_stage(root.path());
+    }
+    #[test]
+    fn late_conflict_keeps_the_concurrent_output_and_cleans_only_our_stage() {
+        let (root, source, output) = fixture();
+        let error = create_staged(&source, &output, |request| {
+            std::fs::write(&request.output, b"complete").unwrap();
+            std::fs::write(&output, b"concurrent user output").unwrap();
+            Ok(CreateResult {
+                entries: 1,
+                bytes_written: 8,
+                skipped: 0,
+            })
+        })
+        .unwrap_err();
+        assert!(matches!(error, TossError::OutputConflict(_)));
+        assert_eq!(std::fs::read(&output).unwrap(), b"concurrent user output");
+        no_stage(root.path());
+    }
+    #[test]
+    fn missing_empty_or_wrong_length_outputs_are_not_committed() {
+        for mode in 0..3 {
+            let (root, source, output) = fixture();
+            let result = create_staged(&source, &output, |request| {
+                if mode == 1 {
+                    std::fs::write(&request.output, b"").unwrap();
+                }
+                if mode == 2 {
+                    std::fs::write(&request.output, b"short").unwrap();
+                }
+                Ok(CreateResult {
+                    entries: 0,
+                    bytes_written: 0,
+                    skipped: 0,
+                })
+            });
+            assert!(result.is_err());
+            assert!(!output.exists());
+            no_stage(root.path());
+        }
+    }
+    #[test]
+    fn output_inside_the_canonical_source_is_refused_before_backend_or_staging() {
+        let (root, source, _) = fixture();
+        let output = source.join("inside.7z");
+        let result = create_staged(&source, &output, |_| panic!("backend must not be called"));
+        assert!(matches!(result, Err(TossError::InvalidArguments(_))));
+        assert!(!output.exists());
+        no_stage(root.path());
     }
 }

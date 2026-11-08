@@ -39,6 +39,32 @@ pub struct Reader {
 }
 
 impl Reader {
+    pub fn summary(
+        path: &Path,
+        limits: super::super::budget::ExtractionLimits,
+    ) -> Result<super::super::budget::ArchiveSummary, ArchiveError> {
+        let mut reader = Self::new()?;
+        reader.register(ArchiveFormat::Unknown);
+        reader.open(path)?;
+        let mut summary = super::super::budget::ArchiveSummary::default();
+        let mut entry = std::ptr::null_mut();
+        loop {
+            // SAFETY: the reader is live; entry is an out-pointer owned by it.
+            let code = unsafe { raw::archive_read_next_header(reader.inner.as_ptr(), &mut entry) };
+            if code == raw::ARCHIVE_EOF {
+                return Ok(summary);
+            }
+            if code < 0 {
+                return Err(reader.read_failure(code, "preflight"));
+            }
+            // SAFETY: entry was returned by the successful header read.
+            let regular =
+                unsafe { raw::archive_entry_filetype(entry) } & raw::AE_IFMT == raw::AE_IFREG;
+            let size = reader.describe_entry(entry).size;
+            summary.add(regular, size, limits)?;
+            reader.skip_member()?;
+        }
+    }
     /// Allocate a reader.
     ///
     /// Returns [`ArchiveError::BackendFailure`] rather than panicking if
@@ -293,6 +319,7 @@ impl Reader {
             bytes_written: 0,
             skipped: 0,
         };
+        let mut budget = super::super::budget::ExtractionBudget::new(request.limits);
         let mut entry = std::ptr::null_mut();
 
         loop {
@@ -306,6 +333,7 @@ impl Reader {
                 return Err(reader.read_failure(code, "extract"));
             }
 
+            budget.member()?;
             let info = reader.describe_entry(entry);
             let destination =
                 crate::backend::archive::policy::destination(&request.output_root, &info.path)?;
@@ -317,7 +345,7 @@ impl Reader {
                 reader.make_dir(&destination)?;
                 reader.skip_member()?;
             } else if kind == raw::AE_IFREG {
-                result.bytes_written += reader.write_member(&destination)?;
+                result.bytes_written += reader.write_member(&destination, &mut budget)?;
             } else {
                 reader.skip_member()?;
                 result.skipped += 1;
@@ -345,7 +373,11 @@ impl Reader {
     }
 
     /// Write one regular member, returning the bytes it produced.
-    fn write_member(&self, destination: &Path) -> Result<u64, ArchiveError> {
+    fn write_member(
+        &self,
+        destination: &Path,
+        budget: &mut super::super::budget::ExtractionBudget,
+    ) -> Result<u64, ArchiveError> {
         if let Some(parent) = destination.parent() {
             self.make_dir(parent)?;
         }
@@ -390,6 +422,7 @@ impl Reader {
             }
 
             let count = read as usize;
+            budget.output(count as u64)?;
             file.write_all(&buffer[..count])
                 .map_err(|err| self.io_failure(destination, err))?;
             written += read as u64;
@@ -577,7 +610,7 @@ mod tests {
     /// timing-dependent assertion is no assertion at all.
     static GUARD: Mutex<()> = Mutex::new(());
 
-    fn exclusive() -> MutexGuard<'static, ()> {
+    pub(super) fn exclusive() -> MutexGuard<'static, ()> {
         GUARD
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -790,6 +823,7 @@ mod tests {
         ExtractRequest {
             input: ArchiveInput::single(corpus(archive)),
             output_root: output_root.to_path_buf(),
+            limits: Default::default(),
         }
     }
 
@@ -951,6 +985,7 @@ mod tests {
         let request = ExtractRequest {
             input: ArchiveInput::single(archive_path),
             output_root: scratch.path().join("root"),
+            limits: Default::default(),
         };
         std::fs::create_dir_all(&request.output_root).expect("output root");
 
@@ -1002,6 +1037,7 @@ mod tests {
         Reader::extract(&ExtractRequest {
             input: ArchiveInput::single(archive.to_path_buf()),
             output_root,
+            limits: Default::default(),
         })
     }
 
@@ -1143,5 +1179,59 @@ mod tests {
             checked >= 24,
             "expected the whole corpus to run, only checked {checked}"
         );
+    }
+}
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+    use crate::backend::archive::{ArchiveInput, ExtractRequest, budget::ExtractionLimits};
+    #[test]
+    fn every_registered_format_enforces_actual_bytes_without_preflight() {
+        let _serial = super::tests::exclusive();
+        let root =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join(".sandbox-test/reliability-20261102/native");
+        std::fs::create_dir_all(&root).unwrap();
+        for name in [
+            "simple.zip",
+            "simple.7z",
+            "simple-rar4.rar",
+            "simple-rar5.rar",
+        ] {
+            let directory = tempfile::tempdir_in(&root).unwrap();
+            let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/corpus/archive/valid")
+                .join(name);
+            let limits = ExtractionLimits {
+                total_bytes: 1,
+                file_bytes: 1,
+                entries: 100_000,
+            };
+            let result = Reader::extract(&ExtractRequest {
+                input: ArchiveInput::single(path),
+                output_root: directory.path().to_owned(),
+                limits,
+            });
+            assert!(
+                matches!(result, Err(ArchiveError::BudgetExceeded(_))),
+                "{name}: {result:?}"
+            );
+            fn bytes(root: &Path) -> u64 {
+                std::fs::read_dir(root)
+                    .unwrap()
+                    .map(|entry| {
+                        let entry = entry.unwrap();
+                        if entry.path().is_dir() {
+                            bytes(&entry.path())
+                        } else {
+                            entry.metadata().unwrap().len()
+                        }
+                    })
+                    .sum()
+            }
+            assert!(
+                bytes(directory.path()) <= 1,
+                "over-budget block reached disk: {name}"
+            );
+        }
     }
 }

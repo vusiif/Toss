@@ -32,6 +32,37 @@ pub(super) struct Decoded {
     pub(super) pixels: Vec<u8>,
 }
 
+const MAX_DIMENSION: u32 = 32_768;
+const MAX_PIXELS: u64 = 64 * 1024 * 1024;
+const MAX_PIXEL_BYTES: u64 = 256 * 1024 * 1024;
+
+fn pixel_layout(path: &Path, width: u32, height: u32) -> Result<(u32, usize), TossError> {
+    if width == 0 || height == 0 {
+        return Err(corrupt(path, "the image reports no pixels"));
+    }
+    let pixels = u64::from(width) * u64::from(height);
+    if width > MAX_DIMENSION || height > MAX_DIMENSION || pixels > MAX_PIXELS {
+        return Err(TossError::other(format!(
+            "{}: image exceeds the native viewer limit (32768 pixels per side, 64 Mi pixels, 256 MiB decoded)",
+            path.display()
+        )));
+    }
+    let bytes = pixels * 4;
+    if bytes > MAX_PIXEL_BYTES {
+        return Err(TossError::other("image exceeds the decoded byte limit"));
+    }
+    Ok((width * 4, bytes as usize))
+}
+
+fn pixel_buffer(length: usize) -> Result<Vec<u8>, TossError> {
+    let mut pixels = Vec::new();
+    pixels
+        .try_reserve_exact(length)
+        .map_err(|_| TossError::other("not enough memory for the decoded image"))?;
+    pixels.resize(length, 0);
+    Ok(pixels)
+}
+
 /// Decode `path` into 32-bit PBGRA, or say why it could not be done.
 pub(super) fn decode(path: &Path) -> Result<Decoded, TossError> {
     // Every WIC object is a COM object, so the apartment comes first, and it
@@ -70,6 +101,14 @@ pub(super) fn decode(path: &Path) -> Result<Decoded, TossError> {
             .map_err(|err| refused(path, err))?;
         let frame = decoder.GetFrame(0).map_err(|err| refused(path, err))?;
 
+        // Reject dimensions before initializing pixel conversion or allocating
+        // our output. WIC's private decoder allocations are outside this budget.
+        let (mut width, mut height) = (0_u32, 0_u32);
+        frame
+            .GetSize(&mut width, &mut height)
+            .map_err(|err| refused(path, err))?;
+        let (stride, length) = pixel_layout(path, width, height)?;
+
         let converter = factory
             .CreateFormatConverter()
             .map_err(|err| super::failed("decode the image", err))?;
@@ -84,29 +123,17 @@ pub(super) fn decode(path: &Path) -> Result<Decoded, TossError> {
             )
             .map_err(|err| refused(path, err))?;
 
-        let (mut width, mut height) = (0_u32, 0_u32);
+        let (mut converted_width, mut converted_height) = (0_u32, 0_u32);
         converter
-            .GetSize(&mut width, &mut height)
+            .GetSize(&mut converted_width, &mut converted_height)
             .map_err(|err| refused(path, err))?;
-
-        // A zero-sized image is not an error WIC reports often, but it is
-        // one it is allowed to — and it is still a statement about the file
-        // rather than about the system (§24: 6, not 1).
-        if width == 0 || height == 0 {
-            return Err(corrupt(path, "the image reports no pixels"));
+        if (converted_width, converted_height) != (width, height) {
+            return Err(corrupt(
+                path,
+                "pixel converter changed the image dimensions",
+            ));
         }
-
-        // Checked rather than `width * 4`: this is a number a file chose,
-        // and §23 does not allow it to panic a debug build (wrap silently in
-        // a release one either).
-        let stride = width
-            .checked_mul(4)
-            .ok_or_else(|| corrupt(path, "the image is too wide to lay out"))?;
-        let length = (stride as usize)
-            .checked_mul(height as usize)
-            .ok_or_else(|| corrupt(path, "the image is too large to hold in memory"))?;
-
-        let mut pixels = vec![0_u8; length];
+        let mut pixels = pixel_buffer(length)?;
         converter
             .CopyPixels(std::ptr::null(), stride, &mut pixels)
             .map_err(|err| refused(path, err))?;
@@ -228,6 +255,52 @@ mod tests {
 
     use super::decode;
     use crate::core::error::TossError;
+
+    #[test]
+    fn pixel_budget_rejects_before_allocation_and_preserves_common_sizes() {
+        let path = Path::new("budget.png");
+        for (width, height) in [(3840, 2160), (8000, 6000), (8192, 8192), (32768, 1)] {
+            assert_eq!(
+                super::pixel_layout(path, width, height).unwrap(),
+                (width * 4, width as usize * height as usize * 4)
+            );
+        }
+        for (width, height) in [
+            (0, 1),
+            (1, 0),
+            (32769, 1),
+            (8192, 8193),
+            (u32::MAX, u32::MAX),
+        ] {
+            assert!(super::pixel_layout(path, width, height).is_err());
+        }
+        assert!(
+            super::pixel_buffer(usize::MAX).is_err(),
+            "capacity overflow must be recoverable"
+        );
+        assert_eq!(super::pixel_buffer(4).unwrap(), [0; 4]);
+    }
+
+    #[test]
+    fn oversized_bmp_is_refused_through_wic_without_pixel_payload() {
+        let path =
+            std::env::temp_dir().join(format!("toss-image-budget-{}.bmp", std::process::id()));
+        let mut bytes = std::fs::read(sample("odd.bmp")).unwrap();
+        bytes[18..22].copy_from_slice(&40_000_i32.to_le_bytes());
+        bytes[22..26].copy_from_slice(&1_i32.to_le_bytes());
+        bytes.resize(54 + 120_000, 0);
+        bytes[2..6].copy_from_slice(&120_054_u32.to_le_bytes());
+        bytes[34..38].copy_from_slice(&120_000_u32.to_le_bytes());
+        std::fs::write(&path, bytes).unwrap();
+        let result = decode(&path);
+        std::fs::remove_file(&path).unwrap();
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("native viewer limit")
+        );
+    }
 
     /// The colour every lossless sample was written with, in RGB.
     const TOP_LEFT: [u8; 3] = [200, 60, 10];

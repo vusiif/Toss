@@ -24,6 +24,7 @@ may support fewer features.
 | DOCX | Read text, paragraphs and tables in the terminal, with supported picture previews |
 | Word 97–2003 DOC | Read supported text, tables and pictures in the terminal |
 | PDF | View rasterized pages in the native Windows window |
+| XLSX, XLSM, CSV, TSV | Read tables in the terminal; redirect output to first-sheet CSV |
 | Unrecognised input | Show basic file information |
 
 A media extension identifies a container, not a guarantee that its codecs are
@@ -97,7 +98,18 @@ Redirected Word output contains text and image placeholders, without the
 interactive interface or ANSI styling. This is not OCR, and does not extract
 text drawn inside pictures. Structured Word/PDF JSON export is not implemented.
 
+The current literal case-insensitive search finds all non-overlapping matches,
+using original UTF-8 byte positions. It uses Unicode simple case folding, without
+locale-specific or normalization equivalence. Search retains up to 4096 results
+and 16 MiB of shared source text, and reports a reached limit. Paragraph hits
+navigate to their wrapped line; table hits navigate to their row. Per-cell table
+highlighting is not implemented.
+
 ## Image and PDF windows
+
+The native image decoder limits output to 32,768 pixels per side, 64 Mi pixels
+and 256 MiB of BGRA storage, with recoverable buffer allocation errors. This
+does not cap all allocations inside Windows image codecs.
 
 Images fit the window on opening and follow window resizing until manually
 zoomed. Use the mouse wheel to zoom and drag to pan; `F` returns to fit mode.
@@ -110,9 +122,29 @@ render. Password entry for encrypted PDF files is not supported.
 
 ## Media controls
 
-Space pauses/resumes, Left / Right seek by five seconds, Up / Down change
-volume, `F` toggles video fullscreen, and Escape closes playback. Volume does
+For video, Space pauses/resumes, Left / Right seek by five seconds, Up / Down
+change volume, `F` toggles fullscreen, and Escape closes playback. Volume does
 not apply to the silent HEVC software fallback.
+
+Pure audio uses the existing console, without opening a video window:
+
+| Key | Audio action |
+|---|---|
+| Space | Pause / resume |
+| Left / Right | Seek backward / forward five seconds |
+| Up / Down | Change renderer volume by ten percentage points, clamped to 0–100% |
+| Esc, `q`, Ctrl+C | Stop and exit |
+
+A seek while paused returns to paused playback. Seeking to/past a known end
+finishes playback. Volume is best-effort when the system renderer does not expose
+its control service. Commands wait for asynchronous session acknowledgements;
+held Space does not repeatedly toggle pause, and input processing is bounded.
+Normal exit restores the previous console input mode. Playback status goes to
+stderr, with no progress-bar TUI or playlist.
+
+Keyboard input is enabled only when standard input is a real console. With a
+pipe, file, null stdin or no console, audio plays to completion and does not read
+stdin or allocate a replacement console. Source files are opened read-only.
 
 ## Limits and file handling
 
@@ -130,11 +162,38 @@ not apply to the silent HEVC software fallback.
   and 16 megapixels at the fixed rendering scale. These are not hard limits on
   all parser/renderer internal memory allocations.
 - Archive extraction checks member paths and skips links, devices and special
-  files. Existing output destinations are refused. A failed operation can leave
-  partial output; automatic archive extraction currently has no total expanded
-  byte limit, so use sufficient free disk space.
+  files. Trial defaults are 64 GiB total output, 32 GiB per file and 100,000
+  members, counting directories and skipped entries too. Declared sizes are
+  checked before extraction; actual output is checked again before each write.
+- Extraction first writes to a unique temporary directory beside the destination
+  and commits it without replacing any existing target. Ordinary failures clean
+  up this operation's staging directory; interruption or cleanup errors can leave
+  a temporary directory, whose path should be retained for diagnosis. Directory
+  packing likewise stages a closed, nonempty archive beside its destination and
+  publishes it without replacing an existing output. Ordinary failures remove
+  its owned staging directory; abrupt termination can still leave temporary data.
+- Space preflight uses declared logical sizes, filesystem allocation units and a
+  provisional per-entry allowance. The additional reserve defaults to zero for
+  this trial; an empirical safety-margin policy is still pending. Unknown sizes,
+  query failures or insufficient estimated space require `y/N` confirmation.
+  Noninteractive use refuses that risk unless explicitly accepted. This estimate
+  does not guarantee sufficient space or bound the decoder's internal memory/time.
 - Unknown, encrypted, damaged or unsupported files can be refused with a
   diagnostic. Identifying an extension does not establish that a file is valid.
+
+Extraction limits can be adjusted explicitly (sizes are decimal bytes):
+
+```powershell
+.\toss.exe extract archive.zip --max-total-bytes 68719476736 --max-file-bytes 34359738368 --max-entries 100000
+.\toss.exe extract archive.zip --reserve-bytes 1073741824
+.\toss.exe extract archive.zip --accept-space-risk
+```
+
+`--accept-space-risk` bypasses only the space-risk prompt, never the hard output
+limits. The first command shows trial defaults; the reserve example is a user
+choice, not a recommended universal value. No fixed compression-ratio multiplier
+is used. Native transactional extraction is implemented for Windows/Linux/macOS;
+this change has been exercised on Windows only so far.
 
 ## Build from source
 
@@ -155,8 +214,8 @@ C/C++ build tools and CMake; the HEVC fallback additionally needs NASM and the
 MSYS2 bash/make tools used by `build.rs`. First builds may take several minutes.
 Cargo dependencies must be downloaded before using `--offline`.
 
-Features include `archive`, `image`, `media`, `inspect`, `word`, `pdf` and
-`word-pdf`. The `full` feature enables the complete current set. Feature names
+Features include `archive`, `image`, `media`, `inspect`, `word`, `pdf`,
+`word-pdf` and `spreadsheet`. The `full` feature enables the complete current set. Feature names
 alone do not promise every planned command is implemented.
 
 ## Development and verification
@@ -178,7 +237,9 @@ Toss uses libarchive/zlib/liblzma for archives, Windows imaging and Media
 Foundation APIs, and a narrowly configured FFmpeg HEVC fallback. Word terminal
 reading adapts **doxx 0.1.4** (MIT, Brandon Greenwell), using docx-rs, and uses
 **rwml 0.1.4** for binary DOC. PDF rendering uses **Hayro 0.8.0**; DOCX PDF
-preview uses **docxide-pdf 0.19.0**. Exact transitive versions are in Cargo.lock.
+preview uses **docxide-pdf 0.19.0**. The internal **toss-sheet** viewer selectively
+adapts xleak 0.2.6, using the recorded Calamine 0.34.0 adaptation. Exact transitive
+versions are in Cargo.lock.
 
 The local **xml-rs 0.8.29** adaptation adds a default-off
 `toss-omit-namespace-maps` feature, enabled only for the audited Word reader.
@@ -210,3 +271,68 @@ Copyright (C) 2026 IceLolly.
 
 Toss is licensed under **GNU GPL version 3 or, at your option, any later version**.
 See [LICENSE](LICENSE). SPDX: `GPL-3.0-or-later`.
+
+
+### Excel / CSV tables
+
+Full builds open `.xlsx`, `.xlsm`, `.csv` and `.tsv` directly, including via
+`toss view data.xlsx`. In a terminal, arrow keys navigate, Tab switches sheets,
+`/` then Enter searches, Esc cancels a search, `?` shows help and `q` quits.
+The first occupied row is used as the header. No configuration file is required.
+
+```powershell
+.\toss.exe data.xlsx
+.\toss.exe view data.csv
+.\toss.exe data.xlsx > first-sheet.csv
+```
+
+Redirected stdout exports only the first sheet as UTF-8 CSV, without opening the
+interactive viewer. Numeric-looking CSV fields remain strings. Formulas use
+existing cached values and can show expressions; Toss does not recalculate them.
+A missing cache displays as empty. XLSM macros are not executed. Charts and Office
+page layout are not reproduced. CSV supports UTF-8 (with optional BOM); legacy
+`.xls`, `.xlsb` and `.ods` are not yet routed to the table viewer.
+
+Interactive tables start with white text on a black background. Press `T` to toggle
+original Excel colors (including default black text on white), or back to black/white.
+Viewer borders and titles stay on a dark background in both modes. Thin row/column
+grid lines separate displayed cells; these are viewer guides, not reproduction of
+Excel's custom border styles.
+Original-color viewing renders cell text colors and solid fills from XLSX styles
+and themes (direct RGB/ARGB, indexed palettes, theme colors, and HLS luminance tint).
+Header colors follow the source header row when present. Search matches and cursor
+selection take visual precedence over cell colors. Excluded features (conditional formatting, pattern/gradient
+fills, rich-text run colors, row/column default styles) fall back to the active mode's default colors.
+Test scratch output is configurable via `TOSS_SHEET_TEST_TMPDIR` (defaulting to
+`.sandbox-test/spreadsheet-unit`).
+
+Trial limits include 64 MiB input, 1 MiB per cell, four million rectangular XLSX
+cells, and 250,000 CSV records / two million rectangular CSV cells. XLSX also has
+ZIP member and expanded-byte limits. These are admission/display safeguards,
+not universal parser memory/CPU guarantees. Small-file startup and first-readable
+content are the primary performance targets. A minimal build can enable the
+`spreadsheet` Cargo feature separately; no standalone viewer or sidecar is needed.
+
+
+Table options are available after `view` and require exactly one input file:
+
+```powershell
+.\toss.exe view data.xlsx --sheet "Sheet2" --format json > sheet.json
+.\toss.exe view data.csv --no-header --delimiter ";"
+.\toss.exe view data.xlsx --sheet "Sheet2" --format csv > sheet.csv
+```
+
+`--sheet` selects an exact worksheet name. `--no-header` treats the first occupied
+row as data and generates column-letter headers; exported CSV still includes those
+headers. `--delimiter` accepts one ASCII byte and applies only to CSV/TSV. Omit it
+for ordinary comma CSV or tab-separated TSV. Explicit `--format csv` or
+`--format json` always writes to stdout and exits, including in a terminal.
+Without an explicit format, the usual interactive/redirected behavior remains.
+
+JSON contains `sheet`, `rows`, `columns`, `headers` and a two-dimensional `data`
+array. Numeric cells and booleans keep their JSON types; CSV text stays text,
+including leading zeros. Dates are strings, absent values/caches are `null`, and
+explicit empty-string caches remain `""`. Duplicate header names do not overwrite
+data cells. This export contains cached values, not formula recalculation or a
+complete Excel formatting/chart model. Multiple-file JSON concatenation is not
+supported; process one file per command.

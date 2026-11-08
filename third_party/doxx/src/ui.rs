@@ -125,7 +125,7 @@ impl App {
 
         if let Some(search) = &options.search {
             app.search_query = search.clone();
-            app.search_results = crate::document::search_document(&app.document, search);
+            app.refresh_search();
             app.current_view = ViewMode::Search;
         }
 
@@ -206,12 +206,36 @@ impl App {
         self.image_picker = Some(picker);
     }
 
+    pub fn refresh_search(&mut self) {
+        let outcome =
+            crate::document::search_document_with_status(&self.document, &self.search_query);
+        self.search_results = outcome.results;
+        self.status_message=outcome.error.or_else(||outcome.limited.then(||format!("Search limit reached: showing first {} matches (up to 4096 results / 16 MiB retained text)",self.search_results.len())));
+    }
+
+    fn focus_search_result(&mut self) {
+        self.reset_page_anchor();
+        if let Some(result) = self.search_results.get(self.current_search_index) {
+            self.scroll_offset = result.element_index;
+            self.page_line_offset = DocumentWidget::search_line(
+                &self.document.elements[result.element_index],
+                result,
+                self.page_size.0.max(1),
+            );
+        }
+    }
+
     pub fn next_search_result(&mut self) {
         self.reset_page_anchor();
         if !self.search_results.is_empty() {
             self.current_search_index = (self.current_search_index + 1) % self.search_results.len();
             if let Some(result) = self.search_results.get(self.current_search_index) {
                 self.scroll_offset = result.element_index;
+                self.page_line_offset = DocumentWidget::search_line(
+                    &self.document.elements[result.element_index],
+                    result,
+                    self.page_size.0.max(1),
+                );
             }
         }
     }
@@ -226,6 +250,11 @@ impl App {
             };
             if let Some(result) = self.search_results.get(self.current_search_index) {
                 self.scroll_offset = result.element_index;
+                self.page_line_offset = DocumentWidget::search_line(
+                    &self.document.elements[result.element_index],
+                    result,
+                    self.page_size.0.max(1),
+                );
             }
         }
     }
@@ -438,20 +467,13 @@ impl App {
                     return false;
                 }
                 KeyCode::Enter => {
-                    if let Some(res) = self.search_results.get(self.current_search_index) {
-                        self.scroll_offset = res.element_index;
-                    }
-                    self.reset_page_anchor();
+                    self.focus_search_result();
                     self.current_view = ViewMode::Document;
                     return false;
                 }
                 KeyCode::Backspace => {
                     self.search_query.pop();
-                    self.search_results = if self.search_query.is_empty() {
-                        Vec::new()
-                    } else {
-                        crate::document::search_document(&self.document, &self.search_query)
-                    };
+                    self.refresh_search();
                     self.current_search_index = 0;
                     return false;
                 }
@@ -470,8 +492,7 @@ impl App {
                         && !key.modifiers.contains(crossterm::event::KeyModifiers::ALT) =>
                 {
                     self.search_query.push(c);
-                    self.search_results =
-                        crate::document::search_document(&self.document, &self.search_query);
+                    self.refresh_search();
                     self.current_search_index = 0;
                     return false;
                 }
@@ -489,7 +510,7 @@ impl App {
                         .contains(crossterm::event::KeyModifiers::CONTROL) =>
                 {
                     self.search_query.clear();
-                    self.search_results.clear();
+                    self.refresh_search();
                     self.current_search_index = 0;
                     return false;
                 }
@@ -988,7 +1009,7 @@ fn handle_action(app: &mut App, action: Action) -> bool {
         }
         Action::SearchDeleteChar => {
             app.search_query.pop();
-            app.search_results = crate::document::search_document(&app.document, &app.search_query);
+            app.refresh_search();
             app.current_search_index = 0;
         }
         Action::SearchSubmit => {
@@ -1237,23 +1258,22 @@ fn render_search(f: &mut Frame, area: Rect, app: &App) {
                 Style::default()
             };
 
-            // Truncate long results and add context (Unicode-safe)
-            let display_text = if result.text.len() > 80 {
-                // Safe truncation: find the largest valid UTF-8 boundary <= 77 bytes
-                let max_bytes = 77;
-                let safe_boundary = if result.text.len() <= max_bytes {
-                    result.text.len()
-                } else {
-                    let mut boundary = max_bytes;
-                    while boundary > 0 && !result.text.is_char_boundary(boundary) {
-                        boundary -= 1;
-                    }
-                    boundary
-                };
-                format!("{}...", &result.text[..safe_boundary])
-            } else {
-                result.text.clone()
-            };
+            // Show context around this occurrence, not the same paragraph
+            // prefix for every hit. Both endpoints stay on UTF-8 boundaries.
+            let mut start = result.start_pos.saturating_sub(24);
+            while !result.text.is_char_boundary(start) {
+                start -= 1;
+            }
+            let mut end = (start + 77).min(result.text.len());
+            while !result.text.is_char_boundary(end) {
+                end -= 1;
+            }
+            let display_text = format!(
+                "{}{}{}",
+                if start > 0 { "..." } else { "" },
+                &result.text[start..end],
+                if end < result.text.len() { "..." } else { "" }
+            );
 
             ListItem::new(format!("{} {} [{}]", prefix, display_text, i + 1)).style(style)
         })

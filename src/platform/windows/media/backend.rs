@@ -1,14 +1,7 @@
-//! Media Foundation: startup, a session, its events, and teardown.
-//!
-//! This file is Phase 7's first milestone in full (`MEDIA_PLAYBACK.md` §9):
-//! prove the *asynchronous lifetime* — MF ownership, COM lifetime, the event
-//! pump and error mapping — before a window or a key is built on top of it.
-//!
-//! Deliberately absent: any window, any control, any picture. The topology
-//! below connects the source to the system's **audio renderer** and nothing
-//! else, which is enough to drive a session to its end on a real file and is
-//! honest about what P7-A is — the video pipeline arrives with the video
-//! milestone, not sideways into this one.
+//! Media Foundation lifecycle, stream probing and capability-based fallback.
+//! Pure audio uses console controls when stdin is a console and the original
+//! blocking event pump otherwise. Video keeps its existing native window.
+//! Session ownership and ordered closing remain shared by both paths.
 
 use std::path::Path;
 use std::ptr;
@@ -57,16 +50,24 @@ pub(super) fn play(path: &Path) -> Result<(), TossError> {
     let duration = duration.min(i64::MAX as u64) as i64;
 
     if !carries_video(&planned) {
-        // Audio only: one stream, one topology, the blocking pump P7-A
-        // proved — no window (D2). Software v1 decodes no audio, so there is
-        // nothing to fall back to and this path stays terminal (design
-        // §3 table row 7).
+        // No video window for pure audio. Console input is optional and must
+        // never be substituted for redirected stdin. There is no software
+        // audio fallback; unsupported audio keeps its existing typed failure.
         let session = Session::new(path)?;
         let built = topology(path, &source, &descriptor, &planned, None)?;
         start(&session, path, &built)?;
-        session.wait_for(path, MEEndOfPresentation.0 as u32, false)?;
-        session.close(path)?;
-        return Ok(());
+        let playback =
+            super::audio::run_if_interactive(&session.inner, path, duration).and_then(|handled| {
+                if handled {
+                    Ok(())
+                } else {
+                    session.wait_for(path, MEEndOfPresentation.0 as u32, false)
+                }
+            });
+        // Close on both control-loop success and failure; retain the original
+        // playback error if closing also fails.
+        let closed = session.close(path);
+        return playback.and(closed);
     }
 
     // Video, with the lesson of a real file: 10.8 GB of H.264 carrying a
@@ -379,7 +380,7 @@ impl Session {
 /// `IMFSimpleAudioVolume` rather than the per-channel
 /// `IMFAudioStreamVolume` because D2's volume keys are one up/down control,
 /// not a mixer.
-fn simple_audio_volume(
+pub(super) fn simple_audio_volume(
     path: &Path,
     session: &IMFMediaSession,
 ) -> Result<IMFSimpleAudioVolume, TossError> {

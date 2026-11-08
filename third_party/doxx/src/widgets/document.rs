@@ -18,7 +18,7 @@ use crate::document::*;
 struct RenderContext<'a> {
     color_enabled: bool,
     search_matches: &'a [(usize, usize)],
-    is_current_match: bool,
+    current_match: Option<(usize, usize)>,
     element_index: usize,
     layout_cache: &'a mut LayoutCache,
 }
@@ -65,7 +65,7 @@ impl<'a> DocumentWidget<'a> {
     fn page_lines(element: &DocumentElement, width: u16, color: bool) -> Vec<Line<'static>> {
         let mut lines = match element {
             DocumentElement::Paragraph { runs } => {
-                Self::wrap_formatted_runs(runs, width as usize, color, &[], false)
+                Self::wrap_formatted_runs(runs, width as usize, color, &[], None)
             }
             DocumentElement::Heading { text, number, .. } => {
                 let text = number
@@ -82,7 +82,7 @@ impl<'a> DocumentWidget<'a> {
                     width as usize,
                     color,
                     &[],
-                    false,
+                    None,
                 )
             }
             _ => render_element_to_text(element, width as usize)
@@ -97,13 +97,148 @@ impl<'a> DocumentWidget<'a> {
                         width as usize,
                         color,
                         &[],
-                        false,
+                        None,
                     )
                 })
                 .collect(),
         };
         lines.push(Line::default());
         lines
+    }
+
+    /// Locate the selected result in the current screen layout. Table results
+    /// navigate to their row; cell highlighting remains a separate renderer
+    /// capability. Paragraph/list positions use original byte offsets.
+    pub fn search_line(element: &DocumentElement, result: &SearchResult, width: u16) -> usize {
+        let width = width.max(1);
+        let highlighted_line = |text: String, start: usize, end: usize| {
+            Self::wrap_formatted_runs(
+                &[FormattedRun {
+                    text,
+                    formatting: TextFormatting::default(),
+                }],
+                width as usize,
+                false,
+                &[(start, end)],
+                Some((start, end)),
+            )
+            .iter()
+            .position(|line| {
+                line.spans
+                    .iter()
+                    .any(|span| span.style.bg == Some(Color::Yellow))
+            })
+            .unwrap_or(0)
+        };
+        match element {
+            DocumentElement::Paragraph { runs } => Self::wrap_formatted_runs(
+                runs,
+                width as usize,
+                false,
+                &[(result.start_pos, result.end_pos)],
+                Some((result.start_pos, result.end_pos)),
+            )
+            .iter()
+            .position(|line| {
+                line.spans
+                    .iter()
+                    .any(|span| span.style.bg == Some(Color::Yellow))
+            })
+            .unwrap_or(0),
+            DocumentElement::Heading { text, number, .. } => {
+                let prefix = number
+                    .as_ref()
+                    .map_or(String::new(), |number| format!("{number} "));
+                highlighted_line(
+                    format!("{prefix}{text}"),
+                    prefix.len() + result.start_pos,
+                    prefix.len() + result.end_pos,
+                )
+            }
+            DocumentElement::List { .. } => {
+                let parts = render_element_to_text(element, width as usize);
+                let before: usize = parts
+                    .iter()
+                    .take(result.part_index)
+                    .map(|text| {
+                        text.lines()
+                            .map(|line| {
+                                Self::wrap_formatted_runs(
+                                    &[FormattedRun {
+                                        text: line.to_owned(),
+                                        formatting: TextFormatting::default(),
+                                    }],
+                                    width as usize,
+                                    false,
+                                    &[],
+                                    None,
+                                )
+                                .len()
+                            })
+                            .sum::<usize>()
+                    })
+                    .sum();
+                parts.get(result.part_index).map_or(before, |text| {
+                    let prefix = text.len().saturating_sub(result.text.len());
+                    before
+                        + highlighted_line(
+                            text.clone(),
+                            prefix + result.start_pos,
+                            prefix + result.end_pos,
+                        )
+                })
+            }
+            DocumentElement::Table { table } => {
+                let mut part = if table.metadata.has_headers {
+                    table.headers.len()
+                } else {
+                    0
+                };
+                if result.part_index < part {
+                    return 0;
+                }
+                let mut line = 0;
+                if part > 0 {
+                    let header = DocumentElement::Table {
+                        table: TableData {
+                            headers: table.headers.clone(),
+                            rows: Vec::new(),
+                            metadata: table.metadata.clone(),
+                        },
+                    };
+                    line += Self::page_lines(&header, width, false)
+                        .len()
+                        .saturating_sub(1);
+                }
+                for row in &table.rows {
+                    if result.part_index < part + row.len() {
+                        return line;
+                    }
+                    part += row.len();
+                    let mut metadata = table.metadata.clone();
+                    metadata.has_headers = false;
+                    let row = DocumentElement::Table {
+                        table: TableData {
+                            headers: Vec::new(),
+                            rows: vec![row.clone()],
+                            metadata,
+                        },
+                    };
+                    line += Self::page_lines(&row, width, false).len().saturating_sub(1);
+                }
+                line
+            }
+            DocumentElement::CodeBlock { text } => {
+                highlighted_line(text.clone(), result.start_pos, result.end_pos)
+            }
+            DocumentElement::TextBox { lines } => {
+                highlighted_line(lines.join("\n"), result.start_pos, result.end_pos)
+            }
+            DocumentElement::Equation { latex, .. } => {
+                highlighted_line(latex.clone(), result.start_pos, result.end_pos)
+            }
+            _ => 0,
+        }
     }
 
     /// A screen page has a (source element, wrapped line) anchor. Keeping both
@@ -210,7 +345,8 @@ impl<'a> DocumentWidget<'a> {
                 let current = self
                     .search_results
                     .get(self.current_search_index)
-                    .is_some_and(|result| result.element_index == index);
+                    .filter(|result| result.element_index == index)
+                    .map(|result| (result.start_pos, result.end_pos));
                 Cow::Owned(Self::wrap_formatted_runs(
                     runs,
                     area.width as usize,
@@ -330,7 +466,7 @@ impl<'a> DocumentWidget<'a> {
         max_width: usize,
         color_enabled: bool,
         search_matches: &[(usize, usize)], // List of (start_pos, end_pos) for matches in this element
-        is_current_match: bool,            // True if this element contains the current search match
+        current_match: Option<(usize, usize)>, // Original byte range of the selected match
     ) -> Vec<Line<'static>> {
         if max_width == 0 {
             return vec![];
@@ -339,7 +475,7 @@ impl<'a> DocumentWidget<'a> {
         let mut lines = Vec::new();
         let mut current_line: Vec<Span> = Vec::new();
         let mut current_width = 0;
-        let mut char_position = 0; // Track absolute character position across all runs
+        let mut byte_position = 0; // Original UTF-8 byte position across source runs
 
         for run in runs {
             let mut base_style = Style::default();
@@ -375,7 +511,7 @@ impl<'a> DocumentWidget<'a> {
                 if grapheme == "\n" {
                     lines.push(Line::from(std::mem::take(&mut current_line)));
                     current_width = 0;
-                    char_position += 1;
+                    byte_position += 1;
                     continue;
                 }
 
@@ -395,7 +531,7 @@ impl<'a> DocumentWidget<'a> {
                     );
                     merge_with_previous = true;
                     current_width += spaces_needed;
-                    char_position += 1;
+                    byte_position += 1;
                     continue;
                 }
 
@@ -403,10 +539,11 @@ impl<'a> DocumentWidget<'a> {
 
                 // Determine if this character is within a search match
                 let mut style = base_style;
-                for &(start_pos, end_pos) in search_matches {
-                    if char_position >= start_pos && char_position < end_pos {
+                let first = search_matches.partition_point(|&(_, end)| end <= byte_position);
+                for &(start_pos, end_pos) in search_matches[first..].iter().take(1) {
+                    if byte_position < end_pos && byte_position + grapheme.len() > start_pos {
                         // Apply search highlight
-                        if is_current_match {
+                        if current_match == Some((start_pos, end_pos)) {
                             // Current match: bright yellow background
                             style = style.bg(Color::Yellow).fg(Color::Black);
                         } else {
@@ -430,7 +567,7 @@ impl<'a> DocumentWidget<'a> {
                 Self::push_layout_text(&mut current_line, grapheme, style, merge_with_previous);
                 merge_with_previous = true;
                 current_width += g_width;
-                char_position += grapheme.chars().count(); // Advance character position
+                byte_position += grapheme.len();
             }
         }
 
@@ -541,7 +678,7 @@ impl<'a> DocumentWidget<'a> {
                     area.width as usize,
                     ctx.color_enabled,
                     ctx.search_matches,
-                    ctx.is_current_match,
+                    ctx.current_match,
                 );
                 ctx.layout_cache
                     .insert(ctx.element_index, area.width, lines.clone());
@@ -554,7 +691,7 @@ impl<'a> DocumentWidget<'a> {
                 area.width as usize,
                 ctx.color_enabled,
                 ctx.search_matches,
-                ctx.is_current_match,
+                ctx.current_match,
             )
         };
 
@@ -610,7 +747,7 @@ impl<'a> DocumentWidget<'a> {
                 text_width,
                 ctx.color_enabled,
                 ctx.search_matches,
-                ctx.is_current_match,
+                ctx.current_match,
             );
 
             // Render first line (on same line as bullet)
@@ -1015,9 +1152,11 @@ impl<'a> DocumentWidget<'a> {
                 .collect();
 
             // Check if this element contains the current search match
-            let is_current_match = !self.search_results.is_empty()
-                && self.current_search_index < self.search_results.len()
-                && self.search_results[self.current_search_index].element_index == element_index;
+            let current_match = self
+                .search_results
+                .get(self.current_search_index)
+                .filter(|result| result.element_index == element_index)
+                .map(|result| (result.start_pos, result.end_pos));
 
             match element {
                 DocumentElement::Heading {
@@ -1040,7 +1179,7 @@ impl<'a> DocumentWidget<'a> {
                     let mut ctx = RenderContext {
                         color_enabled: self.color_enabled,
                         search_matches: &search_matches,
-                        is_current_match,
+                        current_match,
                         element_index,
                         layout_cache,
                     };
@@ -1051,7 +1190,7 @@ impl<'a> DocumentWidget<'a> {
                     let mut ctx = RenderContext {
                         color_enabled: self.color_enabled,
                         search_matches: &search_matches,
-                        is_current_match,
+                        current_match,
                         element_index,
                         layout_cache,
                     };
@@ -1194,7 +1333,7 @@ fn hex_to_color(hex: &str) -> Option<Color> {
 pub fn render_element_to_text(elem: &DocumentElement, width: usize) -> Vec<String> {
     match elem {
         DocumentElement::Paragraph { runs } => {
-            let lines = DocumentWidget::wrap_formatted_runs(runs, width, false, &[], false);
+            let lines = DocumentWidget::wrap_formatted_runs(runs, width, false, &[], None);
             lines
                 .into_iter()
                 .map(|line| {

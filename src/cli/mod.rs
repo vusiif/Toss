@@ -14,6 +14,9 @@ use std::path::PathBuf;
 
 use crate::core::error::TossError;
 
+mod spreadsheet;
+pub use spreadsheet::{SheetFormat, SheetOptions};
+
 /// An explicit verb from the CLI model (§4.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verb {
@@ -70,7 +73,7 @@ impl Verb {
             Self::Extract => "unpack an archive",
             Self::Pack => "compress a directory",
             Self::Play => "play a video or audio file",
-            Self::View => "open an image",
+            Self::View => "open an image, document, PDF or spreadsheet",
             Self::Info => "inspect a file",
             Self::Hash => "print a checksum",
         }
@@ -82,10 +85,25 @@ impl Verb {
 pub enum Command {
     /// `toss --help`
     Help,
+    Spreadsheet {
+        path: PathBuf,
+        options: SheetOptions,
+    },
+    Extract {
+        paths: Vec<PathBuf>,
+        options: ExtractOptions,
+    },
     /// `toss <path> ...` — Toss decides.
     Automatic { paths: Vec<PathBuf> },
     /// `toss <verb> <path> ...` — the caller decides.
     Explicit { verb: Verb, args: Vec<PathBuf> },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ExtractOptions {
+    pub limits: crate::backend::archive::budget::ExtractionLimits,
+    pub accept_space_risk: bool,
+    pub reserve_bytes: u64,
 }
 
 /// Read a command line. `args` must already exclude the program name.
@@ -94,6 +112,14 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, TossEr
 
     if args.is_empty() {
         return Err(TossError::invalid_arguments("no input given"));
+    }
+
+    if args.first().is_some_and(|arg| arg == "view") {
+        return spreadsheet::parse_view(&args[1..]);
+    }
+
+    if args.first().is_some_and(|arg| arg == "extract") {
+        return parse_extract(&args[1..]);
     }
 
     let mut positionals: Vec<OsString> = Vec::new();
@@ -172,6 +198,19 @@ const USAGE_TAIL: &str = "
 Options:
   -h, --help  show this help
   --          treat every following argument as a path
+
+Extraction options (after extract; sizes are decimal bytes):
+  --max-total-bytes N   total output cap (default 64 GiB)
+  --max-file-bytes N    single-file cap (default 32 GiB)
+  --max-entries N       member cap including directories/skips (default 100000)
+  --reserve-bytes N     additional free-space reserve (trial default 0)
+  --accept-space-risk  accept uncertain/insufficient space estimates; caps remain
+
+Spreadsheet options (after view; options require exactly one table file):
+  --sheet NAME        select a worksheet by its exact name
+  --no-header         keep the first row as data; use column letters as headers
+  --delimiter CHAR    one ASCII delimiter, CSV/TSV only
+  --format csv|json   write data to stdout, even when attached to a terminal
 
 Not every verb has an implementation yet; Toss reports which ones are missing.
 ";
@@ -346,5 +385,127 @@ mod tests {
 
         let err = resolve(Path::new(&arg)).expect_err("this path does not exist");
         assert_eq!(err.exit_code(), ExitCode::NotFound);
+    }
+}
+
+fn parse_extract(args: &[OsString]) -> Result<Command, TossError> {
+    let mut options = ExtractOptions::default();
+    let mut paths = Vec::new();
+    let mut index = 0;
+    let mut ended = false;
+    let mut configured = false;
+    let mut seen = std::collections::HashSet::new();
+    while let Some(arg) = args.get(index) {
+        index += 1;
+        if ended {
+            paths.push(PathBuf::from(arg));
+            continue;
+        }
+        if arg == "--" {
+            ended = true;
+            continue;
+        }
+        if arg == "--help" || arg == "-h" {
+            return Ok(Command::Help);
+        }
+        if !is_option(arg) {
+            paths.push(PathBuf::from(arg));
+            continue;
+        }
+        let name = arg.to_str().unwrap_or_default();
+        if !seen.insert(name) {
+            return Err(TossError::invalid_arguments(format!(
+                "duplicate option: {name}"
+            )));
+        }
+        configured = true;
+        if name == "--accept-space-risk" {
+            options.accept_space_risk = true;
+            continue;
+        }
+        let destination = match name {
+            "--max-total-bytes" => &mut options.limits.total_bytes,
+            "--max-file-bytes" => &mut options.limits.file_bytes,
+            "--max-entries" => &mut options.limits.entries,
+            "--reserve-bytes" => &mut options.reserve_bytes,
+            _ => {
+                return Err(TossError::invalid_arguments(format!(
+                    "unknown option: {name}"
+                )));
+            }
+        };
+        let value = args
+            .get(index)
+            .and_then(|a| a.to_str())
+            .and_then(|a| a.parse::<u64>().ok())
+            .filter(|&n| n > 0 || name == "--reserve-bytes")
+            .ok_or_else(|| {
+                TossError::invalid_arguments(format!(
+                    "{name} requires a decimal integer (positive for hard limits)"
+                ))
+            })?;
+        *destination = value;
+        index += 1;
+    }
+    if paths.is_empty() {
+        return Err(TossError::invalid_arguments(
+            "`extract` needs at least one input",
+        ));
+    }
+    if configured {
+        Ok(Command::Extract { paths, options })
+    } else {
+        Ok(Command::Explicit {
+            verb: Verb::Extract,
+            args: paths,
+        })
+    }
+}
+
+#[cfg(test)]
+mod extraction_options_tests {
+    use super::*;
+    #[test]
+    fn limits_require_explicit_valid_values_and_risk_acceptance_does_not_disable_them() {
+        let parse_args = |args: &[&str]| parse(args.iter().map(OsString::from));
+        let Command::Extract { paths, options } = parse_args(&[
+            "extract",
+            "--max-total-bytes",
+            "12",
+            "--max-file-bytes",
+            "8",
+            "--max-entries",
+            "3",
+            "--accept-space-risk",
+            "sample.zip",
+        ])
+        .unwrap() else {
+            panic!("extraction options");
+        };
+        assert_eq!(paths, [PathBuf::from("sample.zip")]);
+        assert_eq!(
+            options.limits,
+            crate::backend::archive::budget::ExtractionLimits {
+                total_bytes: 12,
+                file_bytes: 8,
+                entries: 3
+            }
+        );
+        assert!(options.accept_space_risk);
+        for args in [
+            vec!["extract", "--max-entries", "0", "x.zip"],
+            vec!["extract", "--max-total-bytes", "-1", "x.zip"],
+            vec!["extract", "--max-file-bytes"],
+            vec![
+                "extract",
+                "--max-entries",
+                "2",
+                "--max-entries",
+                "3",
+                "x.zip",
+            ],
+        ] {
+            assert!(parse_args(&args).is_err());
+        }
     }
 }
