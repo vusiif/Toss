@@ -206,6 +206,39 @@ fn real_number_formats_render_search_and_switch_without_changing_raw_values() {
 }
 
 #[test]
+fn first_row_is_navigable_searchable_and_styled_in_data_mode() {
+    let mut app = app("Colors", true);
+    assert_eq!(app.current_cell_address(), "A1");
+    assert_eq!(app.sheet_data.height(), 6);
+    assert_eq!(
+        app.sheet_data.headers(),
+        &["A".to_owned(), "B".to_owned(), "C".to_owned()]
+    );
+    assert_eq!(
+        app.sheet_data.get_cell(0, 1).0.unwrap().to_raw_string(),
+        "EXCEL_COLOR"
+    );
+    let b = render(&mut app);
+    expect(
+        &b,
+        "EXCEL_COLOR",
+        Color::Rgb(255, 255, 255),
+        Color::Rgb(36, 64, 98),
+    );
+    app.search_query = "EXCEL_COLOR".to_owned();
+    app.perform_search();
+    app.tick_search();
+    assert_eq!(app.search_matches, vec![(0, 1)]);
+    assert_eq!(app.current_cell_address(), "B1");
+    app.switch_to_next_sheet().unwrap();
+    assert_eq!(app.current_cell_address(), "A1");
+    assert_eq!(
+        app.sheet_data.get_cell(0, 1).0.unwrap().to_raw_string(),
+        "EXCEL_COLOR"
+    );
+}
+
+#[test]
 fn original_colors_leave_chrome_dark_and_grid_in_reserved_spacing() {
     let mut app = app("Colors", false);
     for original in [true, false] {

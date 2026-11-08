@@ -15,6 +15,7 @@ pub enum SheetFormat {
 pub struct SheetOptions {
     pub sheet: Option<String>,
     pub no_header: bool,
+    pub header: bool,
     pub delimiter: Option<u8>,
     pub format: SheetFormat,
 }
@@ -42,10 +43,24 @@ pub(super) fn parse_view(args: &[OsString]) -> Result<Command, TossError> {
         let option = arg.to_str().unwrap_or("");
         match option {
             "--no-header" => {
+                if options.header {
+                    return Err(TossError::invalid_arguments(
+                        "--header conflicts with --no-header",
+                    ));
+                }
                 if options.no_header {
                     return Err(TossError::invalid_arguments("duplicate --no-header"));
                 }
                 options.no_header = true;
+                configured = true;
+            }
+            "--header" => {
+                if options.header || options.no_header {
+                    return Err(TossError::invalid_arguments(
+                        "duplicate or conflicting header option",
+                    ));
+                }
+                options.header = true;
                 configured = true;
             }
             "--sheet" | "--delimiter" | "--format" => {
@@ -190,11 +205,24 @@ mod tests {
             vec!["x.csv", "--delimiter", "中"],
             vec!["x.csv", "--delimiter", "\n"],
             vec!["x.csv", "--no-header", "--no-header"],
+            vec!["x.csv", "--header", "--header"],
+            vec!["x.csv", "--header", "--no-header"],
+            vec!["x.csv", "--no-header", "--header"],
             vec!["x.csv", "--sheet", "A", "--sheet", "B"],
             vec!["x.csv", "--format", "csv", "--format", "json"],
             vec!["x.csv", "--unknown"],
         ] {
             assert!(parse(&args).is_err(), "{args:?}");
         }
+    }
+    #[test]
+    fn header_mode_is_explicit_and_order_independent() {
+        let first = parse(&["--header", "x.xlsx"]).unwrap();
+        assert_eq!(first, parse(&["x.xlsx", "--header"]).unwrap());
+        let Command::Spreadsheet { options, .. } = first else {
+            panic!("wrong command")
+        };
+        assert!(options.header);
+        assert!(!options.no_header);
     }
 }

@@ -15,7 +15,9 @@ use std::path::PathBuf;
 use crate::core::error::TossError;
 
 mod spreadsheet;
-pub use spreadsheet::{SheetFormat, SheetOptions};
+#[cfg(feature = "spreadsheet")]
+pub use spreadsheet::SheetFormat;
+pub use spreadsheet::SheetOptions;
 
 /// An explicit verb from the CLI model (§4.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -208,7 +210,8 @@ Extraction options (after extract; sizes are decimal bytes):
 
 Spreadsheet options (after view; options require exactly one table file):
   --sheet NAME        select a worksheet by its exact name
-  --no-header         keep the first row as data; use column letters as headers
+  --header            explicitly use the first row as a fixed table header
+  --no-header         keep the first row as data (interactive default)
   --delimiter CHAR    one ASCII delimiter, CSV/TSV only
   --format csv|json   write data to stdout, even when attached to a terminal
 

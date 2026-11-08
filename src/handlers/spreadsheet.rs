@@ -30,7 +30,9 @@ pub fn view_with_options(path: &Path, options: SheetOptions) -> Result<(), TossE
         if options.format == SheetFormat::Auto {
             crate::platform::console::ensure();
         }
-        let mut workbook = Workbook::open_with_options(path, options.no_header, options.delimiter)
+        let interactive = options.format == SheetFormat::Auto && std::io::stdout().is_terminal();
+        let no_header = options.no_header || (interactive && !options.header);
+        let mut workbook = Workbook::open_with_options(path, no_header, options.delimiter)
             .map_err(|error| {
                 if error
                     .downcast_ref::<std::io::Error>()
@@ -61,7 +63,7 @@ pub fn view_with_options(path: &Path, options: SheetOptions) -> Result<(), TossE
                     context: "workbook has no sheets".into(),
                 })?
         };
-        if options.format == SheetFormat::Auto && std::io::stdout().is_terminal() {
+        if interactive {
             toss_sheet::tui::run_tui(workbook, &sheet, &Config::default(), true)
                 .map_err(|error| TossError::other(format!("spreadsheet viewer failed: {error:#}")))
         } else {

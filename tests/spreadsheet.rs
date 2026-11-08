@@ -176,6 +176,25 @@ fn explicit_csv_matches_existing_redirected_output() {
     assert!(explicit.status.success());
     assert_eq!(default.stdout, explicit.stdout);
 }
+#[cfg(feature = "spreadsheet")]
+#[test]
+fn explicit_header_preserves_export_contract_and_conflicts_are_rejected() {
+    assert_eq!(
+        json_view("basic.xlsx", &[]),
+        json_view("basic.xlsx", &["--header"])
+    );
+    let path = fixture("basic.xlsx");
+    for args in [
+        vec!["--header", "--no-header"],
+        vec!["--no-header", "--header"],
+    ] {
+        let mut command = vec!["view".as_ref(), path.as_os_str()];
+        command.extend(args.iter().map(std::ffi::OsStr::new));
+        let output = run(&command);
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+    }
+}
 #[cfg(not(feature = "spreadsheet"))]
 #[test]
 fn structured_table_options_still_report_disabled_feature() {

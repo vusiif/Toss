@@ -329,9 +329,16 @@ content are the primary performance targets. A minimal build can enable the
 
 Table options are available after `view` and require exactly one input file:
 
+Interactive viewing defaults to column-letter labels and keeps the first occupied
+row as ordinary selectable/searchable data, preserving source cell coordinates.
+Use `--header` to explicitly promote that row to a fixed header. Redirected output
+retains the existing first-row-as-header convention for script compatibility;
+`--no-header` explicitly exports the first row as data with generated column labels.
+
 ```powershell
 .\toss.exe view data.xlsx --sheet "Sheet2" --format json > sheet.json
 .\toss.exe view data.csv --no-header --delimiter ";"
+.\toss.exe view data.xlsx --header
 .\toss.exe view data.xlsx --sheet "Sheet2" --format csv > sheet.csv
 ```
 

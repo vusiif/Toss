@@ -14,6 +14,6 @@ mod repair_tests;
 pub mod admission;
 mod search;
 
-mod xlsx_stream;
 mod colors;
 mod number_format;
+mod xlsx_stream;
