@@ -5,6 +5,29 @@ use calamine::{Cell, Data, DataRef, Range, Xlsx};
 use std::io::{Read, Seek};
 const MAX_CELLS: usize = 4_000_000;
 const MAX_TEXT: usize = 1024 * 1024;
+
+/// Prepare display styles on demand without building a second data range.
+pub fn collect_styles<R: Read + Seek>(
+    book: &mut Xlsx<R>,
+    name: &str,
+    catalog: &crate::colors::Catalog,
+) -> Result<std::collections::HashMap<(u32, u32), usize>> {
+    let mut styles = std::collections::HashMap::new();
+    let mut reader = book.worksheet_cells_reader(name)?;
+    let default = catalog.get(0);
+    let mut count = 0;
+    while let Some(cell) = reader.next_cell()? {
+        count += 1;
+        if count > MAX_CELLS || text_len(cell.get_value()) > MAX_TEXT {
+            bail!("worksheet style pass exceeds cell budget");
+        }
+        let index = reader.last_style_index().unwrap_or(0);
+        if catalog.get(index) != default {
+            styles.insert(cell.get_position(), index);
+        }
+    }
+    Ok(styles)
+}
 #[derive(Default)]
 struct Span {
     start: Option<(u32, u32)>,
@@ -39,7 +62,7 @@ pub fn load<R: Read + Seek>(
     book: &mut Xlsx<R>,
     name: &str,
     catalog: Option<&crate::colors::Catalog>,
-    colors: &mut std::collections::HashMap<(u32, u32), crate::colors::CellColors>,
+    colors: &mut std::collections::HashMap<(u32, u32), usize>,
 ) -> Result<(Range<Data>, Option<Range<String>>)> {
     let mut span = Span::default();
     let mut values = Vec::new();
@@ -56,9 +79,10 @@ pub fn load<R: Read + Seek>(
                 bail!("worksheet cell count budget exceeded");
             }
             if let Some(catalog) = catalog {
-                let c = catalog.get(reader.last_style_index().unwrap_or(0));
+                let style_index = reader.last_style_index().unwrap_or(0);
+                let c = catalog.get(style_index);
                 if c != catalog.get(0) {
-                    colors.insert(cell.get_position(), c);
+                    colors.insert(cell.get_position(), style_index);
                 }
             }
             let value = cell.get_value();
@@ -98,9 +122,10 @@ pub fn load<R: Read + Seek>(
                 bail!("worksheet formula cell count budget exceeded");
             }
             if let Some(catalog) = catalog {
-                let c = catalog.get(reader.last_style_index().unwrap_or(0));
+                let style_index = reader.last_style_index().unwrap_or(0);
+                let c = catalog.get(style_index);
                 if c != catalog.get(0) {
-                    colors.insert(cell.get_position(), c);
+                    colors.insert(cell.get_position(), style_index);
                 }
             }
             let value = cell.get_value();

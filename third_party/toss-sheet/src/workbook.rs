@@ -13,7 +13,8 @@ pub struct Workbook {
     csv_name: String,
     no_header: bool,
     catalog: Option<crate::colors::Catalog>,
-    cell_colors: std::collections::HashMap<(u32, u32), crate::colors::CellColors>,
+    // Store shared style indices, not a copy of four borders for every cell.
+    cell_colors: std::collections::HashMap<(u32, u32), usize>,
 }
 impl Workbook {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
@@ -82,12 +83,21 @@ impl Workbook {
     pub fn uses_headers(&self) -> bool {
         !self.no_header
     }
+    pub fn prepare_colors(&mut self, name: &str) -> Result<()> {
+        if self.catalog.is_none() {
+            self.enable_colors();
+        }
+        if let (Some(Sheets::Xlsx(book)), Some(catalog)) = (&mut self.sheets, &self.catalog) {
+            self.cell_colors = crate::xlsx_stream::collect_styles(book, name, catalog)?;
+        }
+        Ok(())
+    }
     pub fn color_at(&self, row: usize, col: usize) -> Option<crate::colors::CellColors> {
         self.catalog.as_ref().map(|c| {
             self.cell_colors
                 .get(&(row as u32, col as u32))
                 .copied()
-                .unwrap_or_else(|| c.get(0))
+                .map_or_else(|| c.get(0), |index| c.get(index))
         })
     }
     pub fn sheet_names(&self) -> Vec<String> {

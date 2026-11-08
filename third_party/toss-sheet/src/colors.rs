@@ -8,12 +8,55 @@ use std::io::{Cursor, Read};
 pub struct CellColors {
     pub fg: Color,
     pub bg: Color,
+    /// Top, right, bottom, left; None means an auxiliary grid line only.
+    pub borders: [Option<CellBorder>; 4],
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CellBorder {
+    pub color: Color,
+    pub kind: BorderKind,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum BorderKind {
+    Dotted,
+    Dashed,
+    Thin,
+    Thick,
+    Double,
+}
+impl BorderKind {
+    fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "hair" | "dotted" => Self::Dotted,
+            "dashed" | "dashDot" | "dashDotDot" | "mediumDashed" | "mediumDashDot"
+            | "mediumDashDotDot" | "slantDashDot" => Self::Dashed,
+            "thin" => Self::Thin,
+            "medium" | "thick" => Self::Thick,
+            "double" => Self::Double,
+            _ => return None,
+        })
+    }
+    pub fn glyph(self, horizontal: bool) -> &'static str {
+        match (self, horizontal) {
+            (Self::Dotted, true) => "┈",
+            (Self::Dotted, false) => "┊",
+            (Self::Dashed, true) => "╌",
+            (Self::Dashed, false) => "╎",
+            (Self::Thick, true) => "━",
+            (Self::Thick, false) => "┃",
+            (Self::Double, true) => "═",
+            (Self::Double, false) => "║",
+            (_, true) => "─",
+            (_, false) => "│",
+        }
+    }
 }
 impl Default for CellColors {
     fn default() -> Self {
         Self {
             fg: Color::Rgb(0, 0, 0),
             bg: Color::Rgb(255, 255, 255),
+            borders: [None; 4],
         }
     }
 }
@@ -150,6 +193,9 @@ impl Catalog {
         let mut custom = Vec::new();
         let mut fonts = Vec::new();
         let mut fills = Vec::new();
+        let mut borders = Vec::new();
+        let mut border: [Option<(BorderKind, RefColor)>; 4] = Default::default();
+        let mut border_side = None;
         let mut bases = Vec::new();
         let mut xfs = Vec::new();
         let mut section = String::new();
@@ -157,7 +203,16 @@ impl Catalog {
         let mut fill = RefColor::default();
         let mut solid = false;
         xml(&styles_xml, |start, n, a| {
-            if ["fonts", "fills", "cellStyleXfs", "cellXfs", "indexedColors"].contains(&n) {
+            if [
+                "fonts",
+                "fills",
+                "borders",
+                "cellStyleXfs",
+                "cellXfs",
+                "indexedColors",
+            ]
+            .contains(&n)
+            {
                 if start {
                     section = n.to_owned();
                 } else {
@@ -167,6 +222,27 @@ impl Catalog {
             }
             if start {
                 match (section.as_str(), n) {
+                    ("borders", "border") => {
+                        border = Default::default();
+                        border_side = None;
+                    }
+                    ("borders", "top" | "right" | "bottom" | "left") => {
+                        let side = ["top", "right", "bottom", "left"]
+                            .iter()
+                            .position(|s| *s == n)
+                            .unwrap();
+                        border_side = Some(side);
+                        border[side] = attr(a, "style")
+                            .and_then(BorderKind::parse)
+                            .map(|kind| (kind, RefColor::default()));
+                    }
+                    ("borders", "color") => {
+                        if let Some(side) = border_side
+                            && let Some((_, c)) = &mut border[side]
+                        {
+                            *c = color(a);
+                        }
+                    }
                     ("fonts", "font") => font = RefColor::default(),
                     ("fonts", "color") => font = color(a),
                     ("fills", "fill") => {
@@ -182,6 +258,8 @@ impl Catalog {
                 }
             } else {
                 match (section.as_str(), n) {
+                    ("borders", "border") => borders.push(border.clone()),
+                    ("borders", "top" | "right" | "bottom" | "left") => border_side = None,
                     ("fonts", "font") => fonts.push(font.clone()),
                     ("fills", "fill") => fills.push(if solid {
                         fill.clone()
@@ -231,6 +309,17 @@ impl Catalog {
                         .get(id("fillId", "applyFill"))
                         .and_then(resolve)
                         .unwrap_or(defaults.bg),
+                    borders: borders
+                        .get(id("borderId", "applyBorder"))
+                        .map(|sides| {
+                            sides.each_ref().map(|side| {
+                                side.as_ref().map(|(kind, c)| CellBorder {
+                                    kind: *kind,
+                                    color: resolve(c).unwrap_or(Color::Rgb(0, 0, 0)),
+                                })
+                            })
+                        })
+                        .unwrap_or([None; 4]),
                 }
             })
             .collect();

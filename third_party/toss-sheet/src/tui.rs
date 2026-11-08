@@ -7,7 +7,7 @@ use ratatui::{
     backend::CrosstermBackend,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
-    widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Wrap},
+    widgets::{Block, Borders, Cell, Clear, Padding, Paragraph, Row, Table, Wrap},
 };
 use std::io;
 use std::time::{Duration, Instant};
@@ -510,6 +510,7 @@ pub struct TuiState {
     // Theme state
     current_theme: Theme, // Current color theme
     excel_colors: bool,   // Show workbook colors instead of monochrome cells.
+    original_colors_loaded: bool,
     // Config state
     config: crate::config::Config, // User configuration
 }
@@ -524,7 +525,6 @@ impl TuiState {
         config: &crate::config::Config,
         horizontal_scroll: bool,
     ) -> Result<Self> {
-        workbook.enable_colors();
         let sheet_names = workbook.sheet_names();
         let current_sheet_index = sheet_names
             .iter()
@@ -579,6 +579,7 @@ impl TuiState {
             progress: None,
             current_theme: Self::parse_theme_name(&config.theme.default),
             excel_colors: false,
+            original_colors_loaded: false,
             config: config.clone(),
         };
 
@@ -604,6 +605,15 @@ impl TuiState {
 
     fn current_sheet_name(&self) -> &str {
         &self.sheet_names[self.current_sheet_index]
+    }
+    fn toggle_colors(&mut self) -> Result<()> {
+        if !self.excel_colors && !self.original_colors_loaded {
+            let name = self.current_sheet_name().to_owned();
+            self.workbook.prepare_colors(&name)?;
+            self.original_colors_loaded = true;
+        }
+        self.excel_colors = !self.excel_colors;
+        Ok(())
     }
 
     fn switch_to_next_sheet(&mut self) -> Result<()> {
@@ -1209,7 +1219,10 @@ impl TuiState {
                 || (code == KeyCode::Char('T')
                     && (modifiers - crossterm::event::KeyModifiers::SHIFT).is_empty())
             {
-                self.excel_colors = !self.excel_colors;
+                if let Err(error) = self.toggle_colors() {
+                    self.copy_feedback =
+                        Some((format!("Excel colors unavailable: {error}"), Instant::now()));
+                }
             } else if self.key_matches(code, modifiers, "search") {
                 self.search_mode = true;
                 self.clear_search();
@@ -1277,8 +1290,8 @@ impl TuiState {
 
         // Calculate visible viewport
         // Each visible row has a content line and a grid separator.
-        let table_height = (chunks[0].height.saturating_sub(4) / 2) as usize;
-        let viewport_width = chunks[0].width.saturating_sub(2) as usize; // Account for borders
+        let table_height = (chunks[0].height.saturating_sub(5) / 2) as usize;
+        let viewport_width = chunks[0].width.saturating_sub(4) as usize;
 
         // Update scroll to keep cursor visible
         self.update_scroll(table_height);
@@ -1344,7 +1357,10 @@ impl TuiState {
             })
             .collect();
 
-        let header = Row::new(header_cells).height(1).bottom_margin(1);
+        let header = Row::new(header_cells)
+            .height(1)
+            .top_margin(1)
+            .bottom_margin(1);
 
         // Get visible rows from data source (handles lazy loading if needed)
         let (visible_rows, _visible_formulas) =
@@ -1440,9 +1456,9 @@ impl TuiState {
         let grid_columns = Layout::horizontal(col_widths.clone())
             .spacing(1)
             .split(Rect::new(
-                chunks[0].x.saturating_add(1),
+                chunks[0].x.saturating_add(2),
                 chunks[0].y.saturating_add(1),
-                chunks[0].width.saturating_sub(2),
+                chunks[0].width.saturating_sub(4),
                 chunks[0].height.saturating_sub(2),
             ));
         let table = Table::new(data_rows, col_widths)
@@ -1451,38 +1467,106 @@ impl TuiState {
             .block(
                 Block::default()
                     .style(ui_style)
+                    .padding(Padding::horizontal(1))
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(colors.border_fg))
                     .title(table_title),
             );
 
         frame.render_widget(table, chunks[0]);
-        // Grid lines are viewer chrome, not Excel border-style reproduction.
-        // Paint only reserved spacing, never cell content or the outer frame.
-        if let (Some(first), Some(last)) = (grid_columns.first(), grid_columns.last()) {
-            let right = last.right().min(chunks[0].right().saturating_sub(1));
+        // Grid and explicit borders share reserved spacing, never cell content.
+        if let (Some(first), Some(last)) = (grid_columns.first(), grid_columns.last())
+            && chunks[0].width >= 5
+            && chunks[0].height >= 5
+        {
+            let left = first.x.saturating_sub(1);
+            let right = last.right().min(chunks[0].right().saturating_sub(2));
             let bottom = first
                 .y
-                .saturating_add(((visible_row_count + 1) as u16).saturating_mul(2))
+                .saturating_add(
+                    ((visible_row_count + 1) as u16)
+                        .saturating_mul(2)
+                        .saturating_add(1),
+                )
                 .min(chunks[0].bottom().saturating_sub(1));
-            let grid_style = Style::default().fg(Color::DarkGray).bg(Color::Black);
+            let grid_bg = if self.excel_colors {
+                Color::Rgb(255, 255, 255)
+            } else {
+                Color::Black
+            };
+            let grid_style = Style::default().fg(Color::DarkGray).bg(grid_bg);
             let buf = frame.buffer_mut();
             for y in first.y..bottom {
-                let horizontal = (y - first.y) % 2 == 1;
+                let horizontal = (y - first.y) % 2 == 0;
                 if horizontal {
-                    for x in first.x..right {
+                    for x in left..=right {
                         buf[(x, y)].set_symbol("─").set_style(grid_style);
                     }
                 }
-                for col in grid_columns
-                    .iter()
-                    .take(grid_columns.len().saturating_sub(1))
-                {
-                    let x = col.right();
-                    if x < right {
+                for x in std::iter::once(left).chain(grid_columns.iter().map(|c| c.right())) {
+                    if x <= right {
                         buf[(x, y)]
                             .set_symbol(if horizontal { "┼" } else { "│" })
                             .set_style(grid_style);
+                    }
+                }
+            }
+            if self.excel_colors {
+                let mut edges = Vec::new();
+                for row in 0..=visible_row_count {
+                    let source_row = if row == 0 {
+                        self.workbook
+                            .uses_headers()
+                            .then(|| origin.0.checked_sub(1))
+                            .flatten()
+                    } else {
+                        Some(origin.0 + visible_start + row - 1)
+                    };
+                    let Some(source_row) = source_row else {
+                        continue;
+                    };
+                    let y = first.y + 1 + 2 * row as u16;
+                    for (col_index, col) in
+                        grid_columns.iter().enumerate().filter(|(_, c)| c.width > 0)
+                    {
+                        let Some(style) = self
+                            .workbook
+                            .color_at(source_row, origin.1 + visible_col_start + col_index)
+                        else {
+                            continue;
+                        };
+                        for (side, edge) in style.borders.iter().enumerate() {
+                            let Some(edge) = edge else { continue };
+                            let horizontal = side == 0 || side == 2;
+                            let start = match side {
+                                0 => (col.x - 1, y - 1),
+                                1 => (col.right(), y - 1),
+                                2 => (col.x - 1, y + 1),
+                                _ => (col.x - 1, y - 1),
+                            };
+                            let end = if horizontal {
+                                (col.right(), start.1)
+                            } else {
+                                (start.0, y + 1)
+                            };
+                            edges.push((*edge, start, end, horizontal));
+                        }
+                    }
+                }
+                // At shared edges prefer the stronger line; ties have stable traversal order.
+                edges.sort_by_key(|(edge, ..)| edge.kind);
+                for (edge, start, end, horizontal) in edges {
+                    let style = Style::default().fg(edge.color).bg(grid_bg);
+                    for y in start.1..=end.1 {
+                        for x in start.0..=end.0 {
+                            if x <= right && y < bottom {
+                                let cell = &mut buf[(x, y)];
+                                if cell.symbol() != "┼" {
+                                    cell.set_symbol(edge.kind.glyph(horizontal));
+                                }
+                                cell.set_style(style);
+                            }
+                        }
                     }
                 }
             }

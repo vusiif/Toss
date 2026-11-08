@@ -13,7 +13,7 @@ fn app(sheet: &str, no_header: bool) -> TuiState {
         true,
     )
     .unwrap();
-    app.excel_colors = true;
+    app.toggle_colors().unwrap();
     app
 }
 fn render(app: &mut TuiState) -> Buffer {
@@ -52,6 +52,7 @@ fn starts_monochrome_and_key_toggle_restores_exact_excel_colors() {
     )
     .unwrap();
     assert!(!app.excel_colors);
+    assert!(app.workbook.color_at(1, 1).is_none());
     let b = render(&mut app);
     for marker in [
         "RGB_MARK",
@@ -132,7 +133,14 @@ fn original_colors_leave_chrome_dark_and_grid_in_reserved_spacing() {
         assert_eq!(b[(x - 1, y)].symbol(), "│");
         assert_eq!(b[(x, y + 1)].symbol(), "─");
         assert_eq!(b[(x - 1, y + 1)].symbol(), "┼");
-        assert_eq!(b[(x - 1, y)].bg, Color::Black);
+        assert_eq!(
+            b[(x - 1, y)].bg,
+            if original {
+                Color::Rgb(255, 255, 255)
+            } else {
+                Color::Black
+            }
+        );
         assert_ne!(b[(x - 1, y)].fg, b[(x - 1, y)].bg);
     }
 }
@@ -155,6 +163,101 @@ fn grid_keeps_scrolled_cursor_visible_in_small_viewports() {
         let mut terminal = Terminal::new(TestBackend::new(size.0, size.1)).unwrap();
         terminal.draw(|f| app.render(f)).unwrap();
     }
+}
+
+#[test]
+fn explicit_borders_parse_inheritance_and_render_separately_from_gray_grid() {
+    use crate::colors::BorderKind;
+    let mut workbook = Workbook::open(fixture("borders.xlsx")).unwrap();
+    workbook.enable_colors();
+    workbook.load_sheet("Colors").unwrap();
+    let black = workbook.color_at(1, 1).unwrap().borders[0].unwrap();
+    assert_eq!(black.color, Color::Rgb(0, 0, 0));
+    assert_eq!(black.kind, BorderKind::Thin);
+    assert_eq!(
+        workbook.color_at(2, 1).unwrap().borders[1].unwrap().color,
+        Color::Rgb(255, 0, 0)
+    );
+    assert_eq!(
+        workbook.color_at(2, 1).unwrap().borders[1].unwrap().kind,
+        BorderKind::Thick
+    );
+    assert_eq!(
+        workbook.color_at(3, 1).unwrap().borders[2].unwrap().kind,
+        BorderKind::Dashed
+    );
+    assert_eq!(
+        workbook.color_at(3, 1).unwrap().borders[2].unwrap().color,
+        Color::Rgb(0, 0, 255)
+    );
+    assert_eq!(workbook.color_at(5, 1).unwrap().borders[0], Some(black));
+    assert_eq!(
+        workbook.color_at(5, 2).unwrap().borders[0].unwrap().kind,
+        BorderKind::Dashed
+    );
+    assert_eq!(workbook.color_at(1, 2).unwrap().borders, [None; 4]);
+    let mut app =
+        TuiState::new(workbook, "Colors", &crate::config::Config::default(), true).unwrap();
+    app.excel_colors = true;
+    let b = render(&mut app);
+    let (x, y) = find(&b, "RGB_MARK");
+    assert_eq!(
+        (b[(x, y - 1)].fg, b[(x, y - 1)].bg),
+        (Color::Rgb(0, 0, 0), Color::Rgb(255, 255, 255))
+    );
+    let (cx, cy) = find(&b, "Red text on pale yellow");
+    assert_eq!(b[(cx + 2, cy + 1)].fg, Color::DarkGray);
+    let (x, y) = find(&b, "THEME_MARK");
+    assert_eq!(b[(x - 1, y)].symbol(), "┃");
+    assert_eq!(b[(x - 1, y)].fg, Color::Rgb(255, 0, 0));
+    app.excel_colors = false;
+    let b = render(&mut app);
+    let (x, y) = find(&b, "RGB_MARK");
+    assert_eq!(
+        (b[(x, y - 1)].fg, b[(x, y - 1)].bg),
+        (Color::DarkGray, Color::Black)
+    );
+    for marker in ["THEME_MARK", "INDEX_MARK"] {
+        let (x, y) = find(&b, marker);
+        assert_eq!(b[(x - 1, y)].symbol(), "│");
+        assert_eq!(b[(x, y + 1)].symbol(), "─");
+        assert_eq!(b[(x - 1, y)].fg, Color::DarkGray);
+        assert_eq!(b[(x, y + 1)].fg, Color::DarkGray);
+    }
+    app.switch_to_next_sheet().unwrap();
+    assert_eq!(app.workbook.color_at(1, 1).unwrap().borders, [None; 4]);
+}
+
+#[test]
+fn deferred_colors_keep_data_navigation_and_uncached_formula_borders() {
+    let mut app = TuiState::new(
+        Workbook::open(fixture("borders.xlsx")).unwrap(),
+        "Colors",
+        &crate::config::Config::default(),
+        true,
+    )
+    .unwrap();
+    assert!(app.workbook.color_at(1, 1).is_none());
+    app.cursor_row = 2;
+    app.cursor_col = 1;
+    app.search_query = "INDEX".to_owned();
+    let before = app.sheet_data.get_cell(2, 1).0.unwrap().to_string();
+    let widths = app.column_widths.clone();
+    app.toggle_colors().unwrap();
+    assert_eq!((app.cursor_row, app.cursor_col), (2, 1));
+    assert_eq!(app.search_query, "INDEX");
+    assert_eq!(app.column_widths, widths);
+    assert_eq!(app.sheet_data.get_cell(2, 1).0.unwrap().to_string(), before);
+    assert_eq!(
+        app.workbook.color_at(5, 2).unwrap().borders[0]
+            .unwrap()
+            .kind,
+        crate::colors::BorderKind::Dashed
+    );
+    app.toggle_colors().unwrap();
+    app.toggle_colors().unwrap();
+    assert!(app.excel_colors);
+    assert_eq!(app.sheet_data.get_cell(2, 1).0.unwrap().to_string(), before);
 }
 #[test]
 fn actual_rgb_theme_indexed_blank_header_and_default() {

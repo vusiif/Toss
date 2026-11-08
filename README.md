@@ -295,9 +295,15 @@ page layout are not reproduced. CSV supports UTF-8 (with optional BOM); legacy
 
 Interactive tables start with white text on a black background. Press `T` to toggle
 original Excel colors (including default black text on white), or back to black/white.
-Viewer borders and titles stay on a dark background in both modes. Thin row/column
-grid lines separate displayed cells; these are viewer guides, not reproduction of
-Excel's custom border styles.
+Colors and borders are prepared on the first switch to original-color mode, keeping
+the default information view lighter. Large styled workbooks may briefly pause on
+that first switch; subsequent toggles reuse the prepared styles.
+Viewer borders and titles stay on a dark background in both modes. Gray row/column
+grid lines are reading guides. Explicit XLSX cell borders use the stored edge positions
+and colors only in original-color mode. Black/white mode ignores source borders
+and uses uniform gray thin grid lines solely for reading.
+Thin, thick, double, dotted and dashed lines have terminal approximations; merged-cell
+outlines, diagonal borders and exact Excel junction geometry are not reproduced.
 Original-color viewing renders cell text colors and solid fills from XLSX styles
 and themes (direct RGB/ARGB, indexed palettes, theme colors, and HLS luminance tint).
 Header colors follow the source header row when present. Search matches and cursor
