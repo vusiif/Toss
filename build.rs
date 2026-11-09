@@ -688,6 +688,12 @@ fn configure(cmake: &str, source: &Path, build: &Path, options: &[&str]) {
                 "-DMSVC_USE_STATIC_CRT=OFF"
             });
         }
+    } else {
+        // Rust links a position-independent executable, so every static
+        // archive linked into it must be PIC. Some distributions' compilers
+        // (Ubuntu, Arch) default to it and others (EL8's gcc-toolset) do not;
+        // the Linux release builder runs on the latter, so ask explicitly.
+        command.arg("-DCMAKE_POSITION_INDEPENDENT_CODE=ON");
     }
     // CMake reads a bare backslash as an escape, so every path we hand it is
     // rewritten to forward slashes. On POSIX this is a no-op.

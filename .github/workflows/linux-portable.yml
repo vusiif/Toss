@@ -1,0 +1,83 @@
+name: Linux portable
+
+# The single Linux `toss` binary: built on an EL8 userland (glibc 2.28) so it
+# starts on every mainstream distribution, checked for what it hard-links,
+# then run unchanged on a spread of distributions old and new.
+on:
+  push:
+    branches: [platform-compat]
+  workflow_dispatch:
+
+concurrency:
+  group: linux-portable-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Cache native libraries and Rust build
+        uses: actions/cache@v4
+        with:
+          path: |
+            .native-cache
+            target/el8
+          key: el8-${{ hashFiles('Cargo.lock', 'build.rs', 'scripts/linux/builder.Dockerfile') }}
+          restore-keys: el8-
+
+      - name: Build the EL8 builder image
+        run: docker build -t toss-linux-builder:el8 -f scripts/linux/builder.Dockerfile scripts/linux
+
+      - name: Test, build and check portability
+        run: |
+          docker run --rm -v "$PWD:/src" -e CARGO_TARGET_DIR=/src/target/el8 \
+            toss-linux-builder:el8 bash -c '
+              set -e
+              cargo test --locked --all-features
+              cargo build --release --locked --all-features
+              scripts/linux/check-portability.sh target/el8/release/toss'
+          sudo chown -R "$(id -u):$(id -g)" target .native-cache
+
+      - name: Record binary size
+        run: |
+          size=$(wc -c < target/el8/release/toss)
+          echo "### Linux binary: **$size bytes**" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: toss-linux-x86_64
+          path: target/el8/release/toss
+          if-no-files-found: error
+
+  smoke:
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - rockylinux:8
+          - debian:10
+          - ubuntu:20.04
+          - almalinux:9
+          - amazonlinux:2023
+          - debian:12
+          - ubuntu:24.04
+          - opensuse/leap:15
+          - fedora:latest
+          - archlinux:latest
+          - opensuse/tumbleweed:latest
+    name: smoke (${{ matrix.image }})
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          name: toss-linux-x86_64
+          path: bin
+      - name: Run the binary on ${{ matrix.image }}
+        run: |
+          chmod +x bin/toss
+          docker run --rm -v "$PWD:/repo:ro" "${{ matrix.image }}" \
+            bash /repo/scripts/linux/smoke.sh /repo/bin/toss /repo
