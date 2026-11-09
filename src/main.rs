@@ -18,6 +18,8 @@ fn main() -> std::process::ExitCode {
         Ok(()) => ExitCode::Success.into(),
         Err(err) => {
             log::error(&err);
+            // Explorer launches close their console on exit; keep it readable.
+            platform::console::hold_owned_window_on_failure();
             err.exit_code().into()
         }
     }
