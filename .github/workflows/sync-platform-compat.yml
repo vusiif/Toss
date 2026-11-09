@@ -53,12 +53,17 @@ jobs:
 
       # Pushes made with GITHUB_TOKEN do not start other workflows, so the
       # merged branch would otherwise go untested. workflow_dispatch is the
-      # one event that token is allowed to start.
+      # one event that token is allowed to start. linux-portable.yml exists
+      # only on the branch (EL8 build + distro smoke matrix).
       - name: Run CI on the merged branch
         if: steps.merge.outputs.changed == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh workflow run ci.yml --repo "$GITHUB_REPOSITORY" --ref "$BRANCH"
+        shell: bash
+        run: |
+          for workflow in ci.yml linux-portable.yml; do
+            gh workflow run "$workflow" --repo "$GITHUB_REPOSITORY" --ref "$BRANCH"
+          done
 
       # A conflict, a rejected push or a missing branch all end up here.
       - name: Report the failure
