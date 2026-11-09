@@ -403,8 +403,10 @@ fn windows_destination_tricks_are_refused_at_the_command_line() {
 /// devices, no streams — they must land on disk as recorded), and
 /// libarchive hands a zip's backslash separators over as `/` on every
 /// platform, so `..\..\evil.txt` arrives as `../../evil.txt` and the
-/// shared `..` walk refuses it here just as on Windows. The members before
-/// it were already written; nothing may appear outside the output root.
+/// shared `..` walk refuses it here just as on Windows — so the refusal
+/// names the traversal, never one of the Windows-only names before it.
+/// Extraction is staged and committed only on success, so the refused
+/// archive leaves neither the output root nor staging residue behind.
 #[cfg(not(windows))]
 #[test]
 fn windows_only_hostile_names_stay_contained_on_unix() {
@@ -421,44 +423,26 @@ fn windows_only_hostile_names_stay_contained_on_unix() {
     );
     let message = stderr(&output);
     assert!(
-        message.contains("would escape the output directory"),
-        "the refusal must say what it refused, got: {message}"
+        message.contains("would escape the output directory") && message.contains("evil.txt"),
+        "the refusal must name the traversal member, got: {message}"
+    );
+    assert!(
+        !message.contains("NUL") && !message.contains("CON"),
+        "device names are ordinary on Unix and must not be refused, got: {message}"
     );
 
-    // The seven members written before the refused one, under their exact
-    // recorded names — device names included, because Unix has no devices
-    // to write them to.
     let destination = scratch.path().join("hostile-windows-names");
-    let mut names: Vec<String> = std::fs::read_dir(&destination)
-        .unwrap_or_else(|err| panic!("{}: {err}", destination.display()))
-        .flatten()
-        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+    assert!(
+        !destination.exists(),
+        "a refused extraction must not expose a partial output root"
+    );
+    let names: Vec<_> = std::fs::read_dir(scratch.path())
+        .expect("scratch readable")
+        .map(|entry| entry.unwrap().file_name())
         .collect();
-    names.sort();
     assert_eq!(
         names,
-        [
-            "CON",
-            "NUL",
-            "NUL.txt",
-            "bar.txt ",
-            "baz.txt.",
-            "foo.txt:stream",
-            "ok.txt",
-        ],
-        "unexpected members on disk"
-    );
-
-    // Containment: the archive and the output root, nothing else.
-    let mut beside: Vec<String> = std::fs::read_dir(scratch.path())
-        .expect("scratch readable")
-        .flatten()
-        .map(|entry| entry.file_name().to_string_lossy().into_owned())
-        .collect();
-    beside.sort();
-    assert_eq!(
-        beside,
-        ["hostile-windows-names", "hostile-windows-names.zip"],
-        "something else was written beside the output root: {beside:?}"
+        [std::ffi::OsString::from("hostile-windows-names.zip")],
+        "no staging residue beside the archive"
     );
 }
