@@ -2,9 +2,12 @@ name: CI
 
 on:
   push:
-    branches: [master]
+    # platform-compat carries the cross-platform work and is kept merged with
+    # master by sync-platform-compat.yml, which starts its CI by dispatch.
+    branches: [master, platform-compat]
   pull_request:
     branches: [master]
+  workflow_dispatch:
 
 # A newer commit makes the run in flight pointless: cancel it instead of
 # paying for two. Ten pushes to one PR should not be ten full runs.

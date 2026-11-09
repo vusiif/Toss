@@ -1,0 +1,77 @@
+name: Sync platform-compat
+
+# Keep the cross-platform branch on top of master: every push to master is
+# merged into `platform-compat`. A merge (never a rebase or force push) so
+# work already on the branch is never rewritten. This file must live on
+# master — GitHub runs a push workflow from the pushed branch's copy.
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+# Two quick master pushes must not race each other onto the branch.
+concurrency:
+  group: sync-platform-compat
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  issues: write
+  actions: write
+
+env:
+  BRANCH: platform-compat
+
+jobs:
+  merge:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.BRANCH }}
+          fetch-depth: 0
+
+      - name: Merge master
+        id: merge
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin master
+          if git merge-base --is-ancestor origin/master HEAD; then
+            echo "Already contains master; nothing to do."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if ! git merge --no-edit origin/master; then
+            git merge --abort
+            echo "::error::master does not merge cleanly into $BRANCH; resolve it by hand."
+            exit 1
+          fi
+          git push origin "HEAD:$BRANCH"
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      # Pushes made with GITHUB_TOKEN do not start other workflows, so the
+      # merged branch would otherwise go untested. workflow_dispatch is the
+      # one event that token is allowed to start.
+      - name: Run CI on the merged branch
+        if: steps.merge.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run ci.yml --repo "$GITHUB_REPOSITORY" --ref "$BRANCH"
+
+      # A conflict, a rejected push or a missing branch all end up here.
+      - name: Report the failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          title="Sync failed: master -> $BRANCH"
+          body="Automatic merge of master ($GITHUB_SHA) into \`$BRANCH\` failed; see the log for whether it is a conflict: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          existing=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "\"$title\" in:title" --json number --jq '.[0].number')
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" --body "$body"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body"
+          fi
