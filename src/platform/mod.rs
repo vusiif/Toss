@@ -16,6 +16,9 @@ pub mod media;
 pub mod pdf;
 pub mod portable;
 
+#[cfg(feature = "image")]
+pub(crate) mod raster;
+
 #[cfg(target_os = "windows")]
 pub mod windows;
 

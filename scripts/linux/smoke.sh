@@ -66,9 +66,18 @@ two=("$corpus/archive/corrupt/truncated.zip" table.csv)
 check "batch continues after a failure" 6 "$toss" "${two[@]}"
 expect "  ...summary on stderr"          grep -q 'batch complete' "$work/err"
 
-# Not on Linux yet: each becomes a real check when its phase lands.
+# Pictures and PDFs decode before a display is looked for, so a broken
+# file is exit 6 everywhere; a good one with no display and no terminal
+# (this script's stdio is redirected) is refused in words with exit 3.
+headless=(env -u DISPLAY -u WAYLAND_DISPLAY -u WAYLAND_SOCKET -u XDG_RUNTIME_DIR)
+check "broken picture is corrupt"      6 "${headless[@]}" "$toss" view "$corpus/image/truncated.png"
+check "picture with nowhere to show"   3 "${headless[@]}" "$toss" view "$corpus/image/odd.png"
+expect "  ...says why"                   grep -q 'no display' "$work/err"
+printf 'not a pdf' >bad.pdf
+check "broken PDF is corrupt"          6 "${headless[@]}" "$toss" view bad.pdf
+
+# Not on Linux yet: becomes a real check when its phase lands.
 # (`hash` is unimplemented on every platform, so it is not asserted here.)
-check "image viewing (pending)"        3 "$toss" view "$corpus/image/odd.png"
 check "media playback (pending)"       3 "$toss" play "$corpus/media/tone.wav"
 
 echo "== $pass passed, $fail failed"

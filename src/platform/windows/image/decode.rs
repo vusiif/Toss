@@ -22,49 +22,10 @@ use windows::Win32::System::Com::{
 use windows::core::{Error, PCWSTR};
 
 use crate::core::error::TossError;
-
-/// An image in memory: 32 bits per pixel, top-down, no row padding.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct Decoded {
-    pub(super) width: u32,
-    pub(super) height: u32,
-    /// `width * height * 4` bytes, ordered B, G, R, A.
-    pub(super) pixels: Vec<u8>,
-}
-
-const MAX_DIMENSION: u32 = 32_768;
-const MAX_PIXELS: u64 = 64 * 1024 * 1024;
-const MAX_PIXEL_BYTES: u64 = 256 * 1024 * 1024;
-
-fn pixel_layout(path: &Path, width: u32, height: u32) -> Result<(u32, usize), TossError> {
-    if width == 0 || height == 0 {
-        return Err(corrupt(path, "the image reports no pixels"));
-    }
-    let pixels = u64::from(width) * u64::from(height);
-    if width > MAX_DIMENSION || height > MAX_DIMENSION || pixels > MAX_PIXELS {
-        return Err(TossError::other(format!(
-            "{}: image exceeds the native viewer limit (32768 pixels per side, 64 Mi pixels, 256 MiB decoded)",
-            path.display()
-        )));
-    }
-    let bytes = pixels * 4;
-    if bytes > MAX_PIXEL_BYTES {
-        return Err(TossError::other("image exceeds the decoded byte limit"));
-    }
-    Ok((width * 4, bytes as usize))
-}
-
-fn pixel_buffer(length: usize) -> Result<Vec<u8>, TossError> {
-    let mut pixels = Vec::new();
-    pixels
-        .try_reserve_exact(length)
-        .map_err(|_| TossError::other("not enough memory for the decoded image"))?;
-    pixels.resize(length, 0);
-    Ok(pixels)
-}
+use crate::platform::raster::{Decoded, corrupt, pixel_buffer, pixel_layout};
 
 /// Decode `path` into 32-bit PBGRA, or say why it could not be done.
-pub(super) fn decode(path: &Path) -> Result<Decoded, TossError> {
+pub(crate) fn decode(path: &Path) -> Result<Decoded, TossError> {
     // Every WIC object is a COM object, so the apartment comes first, and it
     // is released however this function ends.
     let _apartment = Apartment::new()?;
@@ -233,15 +194,6 @@ fn refused(path: &Path, err: Error) -> TossError {
     corrupt(path, &err.to_string())
 }
 
-/// The contents of `path` will not decode (§24: exit 6), in the words the
-/// reason was found in.
-fn corrupt(path: &Path, context: &str) -> TossError {
-    TossError::CorruptInput {
-        path: path.to_path_buf(),
-        context: context.to_owned(),
-    }
-}
-
 /// A Win32 error code in its HRESULT form: `HRESULT_FROM_WIN32(n)` puts the
 /// code in the low word under facility 5. Computed rather than imported
 /// because `windows-rs` 0.62 does not export the conversion helper.
@@ -255,31 +207,6 @@ mod tests {
 
     use super::decode;
     use crate::core::error::TossError;
-
-    #[test]
-    fn pixel_budget_rejects_before_allocation_and_preserves_common_sizes() {
-        let path = Path::new("budget.png");
-        for (width, height) in [(3840, 2160), (8000, 6000), (8192, 8192), (32768, 1)] {
-            assert_eq!(
-                super::pixel_layout(path, width, height).unwrap(),
-                (width * 4, width as usize * height as usize * 4)
-            );
-        }
-        for (width, height) in [
-            (0, 1),
-            (1, 0),
-            (32769, 1),
-            (8192, 8193),
-            (u32::MAX, u32::MAX),
-        ] {
-            assert!(super::pixel_layout(path, width, height).is_err());
-        }
-        assert!(
-            super::pixel_buffer(usize::MAX).is_err(),
-            "capacity overflow must be recoverable"
-        );
-        assert_eq!(super::pixel_buffer(4).unwrap(), [0; 4]);
-    }
 
     #[test]
     fn oversized_bmp_is_refused_through_wic_without_pixel_payload() {

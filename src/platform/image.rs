@@ -32,14 +32,16 @@ impl ViewRequest {
 
 /// Open the viewer for `request`.
 ///
-/// Two answers, chosen by one `cfg`:
+/// Three answers, chosen by `cfg`:
 ///
 /// - Windows built with the `image` feature hands the request to the native
-///   viewer, which is the only place in Toss that owns a window.
-/// - Everywhere else — a non-Windows target, or Windows without the feature —
-///   the answer is the refusal Toss gives for every capability it was not
-///   compiled with. That is a supported state rather than a broken one (§14),
-///   and it keeps `toss <anything>` defined on every platform §7 asks for.
+///   viewer (WIC + GDI).
+/// - Any other target built with the feature hands it to the portable
+///   viewer: bundled codecs, and a winit/softbuffer window or, with no
+///   display at all, the terminal.
+/// - A build without the feature answers with the refusal Toss gives for
+///   every capability it was not compiled with. That is a supported state
+///   rather than a broken one (§14).
 ///
 /// The signature is the entire boundary. When a window exists, nothing above
 /// this line changes: no handle, no message, no pixel format crosses it.
@@ -51,7 +53,14 @@ pub fn view(request: &ViewRequest) -> Result<(), TossError> {
 
 /// See the `cfg`'d sibling above; both answer the same way unless there is a
 /// viewer to offer.
-#[cfg(not(all(windows, feature = "image")))]
+#[cfg(all(not(windows), feature = "image"))]
+pub fn view(request: &ViewRequest) -> Result<(), TossError> {
+    ensure_openable(request)?;
+    super::portable::image::view(request)
+}
+
+/// See the `cfg`'d siblings above.
+#[cfg(not(feature = "image"))]
 pub fn view(request: &ViewRequest) -> Result<(), TossError> {
     ensure_openable(request)?;
     Err(TossError::not_implemented("image viewing"))
@@ -84,7 +93,7 @@ fn ensure_openable(request: &ViewRequest) -> Result<(), TossError> {
 /// their tests off Linux, leaving a rule that only one platform can check.
 /// The tests run everywhere; the suppression is scoped to the builds where
 /// the consumer is structurally absent.
-#[cfg_attr(not(all(windows, feature = "image")), allow(dead_code))]
+#[cfg_attr(not(feature = "image"), allow(dead_code))]
 pub mod zoom {
     /// Preserve the existing 25%–400% range, including smaller fit scales.
     pub const MIN_FACTOR: f64 = 0.25;
@@ -241,7 +250,7 @@ pub mod zoom {
 /// The same `cfg_attr` as [`zoom`]: the consumer is the Windows renderer, but
 /// gating these out instead would take their tests off Linux, and a rule only
 /// one platform can check is not a Toss-owned rule (STATUS.md §3.14).
-#[cfg_attr(not(all(windows, feature = "image")), allow(dead_code))]
+#[cfg_attr(not(feature = "image"), allow(dead_code))]
 pub mod pan {
     /// `origin` read back against the edges it has to stay inside.
     ///
@@ -437,7 +446,7 @@ pub mod pan {
 ///
 /// The same `cfg_attr` as [`zoom`] and [`pan`]: consumed only by the Windows
 /// viewer, tested everywhere (STATUS.md §3.14).
-#[cfg_attr(not(all(windows, feature = "image")), allow(dead_code))]
+#[cfg_attr(not(feature = "image"), allow(dead_code))]
 pub mod nav {
     /// The image after this one, wrapping past the end of the set.
     #[must_use]

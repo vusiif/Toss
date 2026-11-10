@@ -4,7 +4,7 @@ use crate::core::error::TossError;
 
 /// Fit the page uniformly inside the available client area. Window decorations
 /// are deducted first so an outer-height cap cannot crop a portrait page.
-#[cfg_attr(not(all(windows, feature = "pdf")), allow(dead_code))]
+#[cfg_attr(not(feature = "pdf"), allow(dead_code))]
 pub(crate) fn initial_client_size(
     page: (u32, u32),
     outer_limit: (i32, i32),
@@ -28,7 +28,7 @@ pub(crate) fn initial_client_size(
 use std::path::Path;
 
 #[cfg(feature = "word-pdf")]
-pub const AVAILABLE: bool = cfg!(all(windows, feature = "pdf"));
+pub const AVAILABLE: bool = cfg!(feature = "pdf");
 
 #[cfg(all(windows, feature = "pdf"))]
 pub fn view(path: &Path) -> Result<(), TossError> {
@@ -36,7 +36,13 @@ pub fn view(path: &Path) -> Result<(), TossError> {
     super::windows::image::view_pdf(document)
 }
 
-#[cfg(not(all(windows, feature = "pdf")))]
+#[cfg(all(not(windows), feature = "pdf"))]
+pub fn view(path: &Path) -> Result<(), TossError> {
+    let document = crate::backend::pdf::Document::open(path)?;
+    super::portable::image::view_pdf(document)
+}
+
+#[cfg(not(feature = "pdf"))]
 pub fn view(_path: &Path) -> Result<(), TossError> {
     Err(TossError::not_implemented("PDF viewing on this build"))
 }
@@ -48,8 +54,9 @@ pub fn view_bytes(bytes: Vec<u8>, source: &Path) -> Result<(), TossError> {
 }
 
 #[cfg(all(not(windows), feature = "word-pdf"))]
-pub fn view_bytes(_bytes: Vec<u8>, _source: &Path) -> Result<(), TossError> {
-    Err(TossError::not_implemented("PDF viewing on this build"))
+pub fn view_bytes(bytes: Vec<u8>, source: &Path) -> Result<(), TossError> {
+    let document = crate::backend::pdf::Document::from_bytes(bytes, source)?;
+    super::portable::image::view_pdf(document)
 }
 
 #[cfg(test)]

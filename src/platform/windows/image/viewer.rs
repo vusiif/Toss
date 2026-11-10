@@ -29,13 +29,12 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCDESTROY, WM_PAINT,
     WM_SETCURSOR, WM_SIZE, WNDCLASS_STYLES, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
 };
-use windows::core::{PCWSTR, w};
+use windows::core::{HSTRING, PCWSTR, w};
 
-use super::decode::Decoded;
-use super::source::Source;
 use crate::core::error::TossError;
 use crate::core::log;
 use crate::platform::image::{ViewRequest, pan, zoom};
+use crate::platform::raster::{Decoded, Source};
 
 /// Class name for every window this process creates.
 const CLASS_NAME: PCWSTR = w!("TossImageViewer");
@@ -103,7 +102,7 @@ pub(super) fn run_source(source: Source, index: usize, image: Decoded) -> Result
     }
 
     let instance = module()?;
-    let title = source.title(index);
+    let title = HSTRING::from(source.title(index));
 
     register_class(instance)?;
 
@@ -685,7 +684,10 @@ fn actual_size(state: &mut ViewerState, window: HWND) {
 /// PDF pages stop at document ends and report a failed adjacent page without
 /// skipping it. Pixels, page number and title change only after success.
 fn browse(state: &mut ViewerState, window: HWND, forward: bool) {
-    let (index, image) = match state.source.adjacent(state.index, forward) {
+    let (index, image) = match state
+        .source
+        .adjacent(state.index, forward, super::decode::decode)
+    {
         Ok(Some(next)) => next,
         Ok(None) => return,
         Err(err) => {
@@ -706,7 +708,7 @@ fn browse(state: &mut ViewerState, window: HWND, forward: bool) {
 
     // The title names what the window is showing, so it has to follow the
     // picture instead of the one it opened on.
-    let title = state.source.title(state.index);
+    let title = HSTRING::from(state.source.title(state.index));
 
     // SAFETY: `window` is live and `title` outlives the call — it is built
     // from a path the state owns.
@@ -932,9 +934,10 @@ mod tests {
     use windows::Win32::Foundation::LPARAM;
     use windows::Win32::Graphics::Gdi::BITMAPINFOHEADER;
 
-    use super::super::decode::{Decoded, decode};
+    use super::super::decode::decode;
     use super::{bitmap_info, drawn_size, outer_size, point_of, within_half_screen};
     use crate::platform::image::pan;
+    use crate::platform::raster::Decoded;
 
     fn sample(name: &str) -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))

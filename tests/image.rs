@@ -11,17 +11,31 @@
 //! would hang the suite — which is exactly what happened once before
 //! (STATUS.md §3.12). Every case below therefore fails *before* any window
 //! exists: a missing path, a broken picture, a directory, or a platform
-//! with no viewer to offer.
+//! with no viewer to offer. The portable viewer opens a window whenever a
+//! display answers, so every command here also runs with the display
+//! environment removed — a developer machine with X11 or Wayland (WSLg
+//! included) must not turn a test into a window.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+/// The real `toss`, with no display to open a window on.
+fn headless() -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_toss"));
+    for name in [
+        "DISPLAY",
+        "WAYLAND_DISPLAY",
+        "WAYLAND_SOCKET",
+        "XDG_RUNTIME_DIR",
+    ] {
+        command.env_remove(name);
+    }
+    command
+}
+
 /// Run the real `toss` against `args`.
 fn toss(args: &[&Path]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_toss"))
-        .args(args)
-        .output()
-        .expect("toss runs")
+    headless().args(args).output().expect("toss runs")
 }
 
 /// The committed image samples, which are read-only input here: unlike
@@ -60,7 +74,7 @@ fn a_directory_given_to_view_is_refused_as_not_an_image() {
     // The complaint names what they typed rather than the vaguer
     // "unsupported format", so §24's 2 and 3 stay distinguishable from a
     // script's side.
-    let output = Command::new(env!("CARGO_BIN_EXE_toss"))
+    let output = headless()
         .arg("view")
         .arg(corpus())
         .output()
@@ -81,7 +95,7 @@ fn a_file_that_is_not_an_image_is_refused_before_any_decoder_sees_it() {
     // rather than from a decode attempt, which would report the same input
     // as a corrupt image (6) and tell a script to expect a broken file.
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
-    let output = Command::new(env!("CARGO_BIN_EXE_toss"))
+    let output = headless()
         .arg("view")
         .arg(&manifest)
         .output()
@@ -97,16 +111,12 @@ fn a_broken_picture_reports_a_corrupt_input_rather_than_a_failure() {
     // act on ("this file is broken") where 1 says only "something went
     // wrong".
     //
-    // On a platform with no viewer, the same input reaches the capability
-    // facade and stops one step earlier with §24's 3: the refusal that
-    // `IMAGE_VIEWER.md` §8 requires to be defined — and never a panic.
+    // Every viewer decodes before it looks for a display, so the answer is 6
+    // with or without one. A build with no viewer stops one step earlier
+    // with §24's 3: the refusal `IMAGE_VIEWER.md` §8 requires to be defined.
     let output = toss(&[&corpus().join("truncated.png")]);
 
-    let expected = if cfg!(all(windows, feature = "image")) {
-        6
-    } else {
-        3
-    };
+    let expected = if cfg!(feature = "image") { 6 } else { 3 };
     assert_eq!(
         output.status.code(),
         Some(expected),
@@ -115,7 +125,26 @@ fn a_broken_picture_reports_a_corrupt_input_rather_than_a_failure() {
     );
 }
 
-#[cfg(not(all(windows, feature = "image")))]
+/// The portable viewer with neither a display nor a terminal (stdout is a
+/// pipe here): a sentence and exit 3, after the picture decoded fine.
+#[cfg(all(not(windows), feature = "image"))]
+#[test]
+fn a_picture_with_nowhere_to_be_shown_is_refused_in_words() {
+    let output = toss(&[&corpus().join("odd.png")]);
+
+    assert_eq!(output.status.code(), Some(3), "got: {}", reported(&output));
+    assert!(
+        reported(&output).contains("no display") && reported(&output).contains("no terminal"),
+        "expected the portable viewer's refusal: {}",
+        reported(&output)
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "nothing is described that is not shown"
+    );
+}
+
+#[cfg(not(feature = "image"))]
 #[test]
 fn an_image_on_a_platform_without_a_viewer_is_defined_behaviour() {
     // `IMAGE_VIEWER.md` §8's portability guard, asserted against the real

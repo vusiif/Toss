@@ -81,3 +81,25 @@ jobs:
           chmod +x bin/toss
           docker run --rm -v "$PWD:/repo:ro" "${{ matrix.image }}" \
             bash /repo/scripts/linux/smoke.sh /repo/bin/toss /repo
+
+  # The same binary opening real windows on a virtual X display. A minimal
+  # container has no desktop, so the libraries every X11 desktop ships and
+  # the viewer loads at run time are installed by hand.
+  window:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          name: toss-linux-x86_64
+          path: bin
+      - name: Open the image viewer under Xvfb
+        run: |
+          chmod +x bin/toss
+          docker run --rm -v "$PWD:/repo:ro" ubuntu:24.04 bash -c '
+            set -e
+            apt-get update -qq
+            DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+              xvfb x11-utils libxcursor1 libxkbcommon-x11-0 >/dev/null
+            bash /repo/scripts/linux/window-smoke.sh /repo/bin/toss /repo'
