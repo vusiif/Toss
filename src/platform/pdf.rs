@@ -27,7 +27,7 @@ pub(crate) fn initial_client_size(
 
 use std::path::Path;
 
-#[cfg(feature = "word-pdf")]
+#[cfg(all(windows, feature = "word-pdf"))]
 pub const AVAILABLE: bool = cfg!(feature = "pdf");
 
 #[cfg(all(windows, feature = "pdf"))]
@@ -51,12 +51,6 @@ pub fn view(_path: &Path) -> Result<(), TossError> {
 pub fn view_bytes(bytes: Vec<u8>, source: &Path) -> Result<(), TossError> {
     let document = crate::backend::pdf::Document::from_bytes(bytes, source)?;
     super::windows::image::view_pdf(document)
-}
-
-#[cfg(all(not(windows), feature = "word-pdf"))]
-pub fn view_bytes(bytes: Vec<u8>, source: &Path) -> Result<(), TossError> {
-    let document = crate::backend::pdf::Document::from_bytes(bytes, source)?;
-    super::portable::image::view_pdf(document)
 }
 
 #[cfg(test)]

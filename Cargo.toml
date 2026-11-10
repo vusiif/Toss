@@ -71,7 +71,6 @@ doxx = { path = "third_party/doxx", optional = true }
 rwml = { version = "=0.1.4", default-features = false, optional = true }
 cfb = { version = "0.10", optional = true }
 hayro = { version = "=0.8.0", optional = true }
-docxide-pdf = { version = "=0.19.0", default-features = false, optional = true }
 zip = { version = "=8.1.0", default-features = false, features = ["deflate"], optional = true }
 
 # Target-gated rather than a plain dependency: `windows` does not compile on
@@ -93,6 +92,9 @@ zip = { version = "=8.1.0", default-features = false, features = ["deflate"], op
 # emitted, without the types and features their declarations name, wherever
 # P7-A passes null for them.
 [target.'cfg(windows)'.dependencies]
+# Word-to-PDF: third-party, and only where it already shipped. Other
+# platforms wait for the project's own converter instead of wiring this.
+docxide-pdf = { version = "=0.19.0", default-features = false, optional = true }
 windows = { version = "0.62", optional = true, features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",

@@ -75,12 +75,12 @@ pub fn view(path: &Path) -> Result<(), TossError> {
             })
             .map_err(std::io::Error::other)
         };
-        #[cfg(feature = "word-pdf")]
+        #[cfg(all(windows, feature = "word-pdf"))]
         let mut cached_pdf: Option<Vec<u8>> = None;
-        #[cfg(feature = "word-pdf")]
+        #[cfg(all(windows, feature = "word-pdf"))]
         let source_metadata =
             std::fs::metadata(path).map_err(|err| TossError::from_io(path, err))?;
-        #[cfg(feature = "word-pdf")]
+        #[cfg(all(windows, feature = "word-pdf"))]
         let mut open_pdf = || {
             let current = std::fs::metadata(path)?;
             if current.len() != source_metadata.len()
@@ -97,7 +97,7 @@ pub fn view(path: &Path) -> Result<(), TossError> {
             crate::platform::pdf::view_bytes(cached_pdf.as_ref().unwrap().clone(), path)
                 .map_err(std::io::Error::other)
         };
-        #[cfg(feature = "word-pdf")]
+        #[cfg(all(windows, feature = "word-pdf"))]
         let pdf_callback: Option<&mut dyn FnMut() -> std::io::Result<()>> =
             if crate::platform::pdf::AVAILABLE
                 && path
@@ -108,7 +108,7 @@ pub fn view(path: &Path) -> Result<(), TossError> {
             } else {
                 None
             };
-        #[cfg(not(feature = "word-pdf"))]
+        #[cfg(not(all(windows, feature = "word-pdf")))]
         let pdf_callback = None;
         doxx::ui::run_toss_viewer_with_previews(document, &app_options, open_image, pdf_callback)
             .map_err(|err| TossError::from_io(path, err))

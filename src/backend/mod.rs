@@ -31,5 +31,5 @@ pub mod archive;
 #[cfg(feature = "pdf")]
 pub mod pdf;
 
-#[cfg(feature = "word-pdf")]
+#[cfg(all(windows, feature = "word-pdf"))]
 pub mod word_pdf;
