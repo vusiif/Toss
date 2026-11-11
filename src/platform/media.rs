@@ -36,9 +36,18 @@ pub fn play(path: &Path) -> Result<(), TossError> {
     super::windows::media::play(path)
 }
 
-/// See the `cfg`'d sibling above; both answer the same way unless there is
-/// a player to offer.
-#[cfg(not(all(windows, feature = "media")))]
+/// Everywhere else with the `media` feature the portable player answers:
+/// bundled FFmpeg decoders, a winit window for pictures and the system's
+/// sound library loaded at run time. No OS media framework is assumed,
+/// because no two Linux distributions agree on one.
+#[cfg(all(not(windows), feature = "media"))]
+pub fn play(path: &Path) -> Result<(), TossError> {
+    super::portable::media::play(path)
+}
+
+/// See the `cfg`'d siblings above; a build without the feature answers with
+/// the refusal Toss gives for every capability it was not compiled with.
+#[cfg(not(feature = "media"))]
 pub fn play(_path: &Path) -> Result<(), TossError> {
     Err(TossError::not_implemented("media playback"))
 }

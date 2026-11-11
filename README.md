@@ -31,8 +31,11 @@ A media extension identifies a container, not a guarantee that its codecs are
 available. A bundled HEVC software fallback handles supported MP4/MKV video when
 the system decoder is unavailable; **that fallback is video-only, without audio**.
 
-Windows x64 is the executable target. The core and selected backend tests also
-build on Linux; native image, PDF-window and media viewing are Windows-only.
+Windows x64 is the executable target. A single Linux x86-64 `toss` (glibc 2.28
+or newer: RHEL 8, Debian 10, Ubuntu 20.04 and later) views images and PDFs in a
+window (X11 or Wayland) and plays media with its bundled FFmpeg, sound through
+ALSA; without a display or sound device it says so and does what it still can.
+Word-to-PDF viewing is Windows-only.
 
 ## Get started
 

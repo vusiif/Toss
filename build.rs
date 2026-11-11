@@ -125,6 +125,8 @@ fn main() {
     println!("cargo:rerun-if-changed=third_party/xz");
     println!("cargo:rerun-if-changed=third_party/ffmpeg");
     println!("cargo:rerun-if-changed=src/platform/windows/media/hevc_shim.c");
+    println!("cargo:rerun-if-changed=src/platform/portable/media/media_shim.c");
+    println!("cargo:rerun-if-env-changed=TOSS_FFMPEG_NO_ASM");
     println!("cargo:rerun-if-env-changed=CMAKE");
 
     let manifest = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("cargo sets this"));
@@ -181,10 +183,14 @@ fn main() {
     // exactly — Windows target plus `media` feature — plus the msvc target,
     // because that is the product's (§36). Linux and no-feature builds
     // never hear of FFmpeg at all.
-    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
-        && env::var_os("CARGO_FEATURE_MEDIA").is_some()
-    {
-        build_ffmpeg(&manifest, &out);
+    if env::var_os("CARGO_FEATURE_MEDIA").is_some() {
+        if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+            build_ffmpeg(&manifest, &out);
+        } else {
+            // Everywhere else FFmpeg is the whole media stack, not a
+            // fallback: see `build_ffmpeg_unix`.
+            build_ffmpeg_unix(&manifest, &out);
+        }
     }
 }
 
@@ -1330,4 +1336,238 @@ fn windows_to_posix(path: &Path) -> String {
         return format!("/{}{}", drive.to_lowercase(), rest);
     }
     text
+}
+
+// ---------------------------------------------------------------------------
+// FFmpeg — the whole media stack on non-Windows targets
+// ---------------------------------------------------------------------------
+
+/// Configure flags for the vendored FFmpeg where there is no system media
+/// framework to lean on: Linux has none that every distribution ships, so
+/// the one binary carries its own decoders.
+///
+/// The capability is exactly what detection classifies as media — mp4, mov,
+/// mkv, webm, avi, mp3, flac, wav — and the codecs those containers carry
+/// in practice. Rulings kept from the Windows closure: GPL and nonfree stay
+/// off (re-checked against `config.h`), nothing is autodetected from the
+/// build machine, and no network code is built.
+///
+/// - **`--disable-autodetect`**: a builder that happens to have zlib, ALSA
+///   or X11 headers must not produce a different binary — or a hard link.
+/// - **`--enable-pic`**: the archives are linked into a position-independent
+///   executable.
+/// - **swresample on**: sound leaves as 48 kHz stereo S16 whatever the file
+///   holds; the conversion is the capability, as swscale's is for pictures.
+/// - **no AV1**: FFmpeg's own AV1 decoder is hardware-only; software AV1
+///   would mean vendoring another library.
+const FFMPEG_UNIX_OPTIONS: &[&str] = &[
+    "--disable-everything",
+    "--disable-autodetect",
+    "--disable-programs",
+    "--disable-doc",
+    "--disable-debug",
+    "--disable-avdevice",
+    "--disable-avfilter",
+    "--disable-network",
+    "--enable-static",
+    "--disable-shared",
+    "--enable-pic",
+    "--enable-demuxer=mov,matroska,avi,mp3,flac,wav",
+    "--enable-decoder=h264,hevc,vp8,vp9,mpeg4",
+    "--enable-decoder=aac,mp3,flac,opus,vorbis,ac3,dca",
+    "--enable-decoder=pcm_u8,pcm_s16le,pcm_s16be,pcm_s24le,pcm_s32le,pcm_f32le,pcm_f64le,pcm_alaw,pcm_mulaw",
+    "--enable-parser=h264,hevc,vp8,vp9,mpeg4video,aac,mpegaudio,flac,opus,vorbis,ac3,dca",
+    "--enable-protocol=file",
+];
+
+/// The static libraries the unix FFmpeg build leaves in the cache, in link
+/// order: every dependency after the dependant that needs it.
+const FFMPEG_UNIX_LIBRARIES: [&str; 6] = [
+    "toss_media_shim",
+    "avformat",
+    "avcodec",
+    "swscale",
+    "swresample",
+    "avutil",
+];
+
+fn unix_media_shim(manifest: &Path) -> PathBuf {
+    manifest
+        .join("src")
+        .join("platform")
+        .join("portable")
+        .join("media")
+        .join("media_shim.c")
+}
+
+/// Whether this target's FFmpeg assembly needs NASM (x86 only; other
+/// architectures assemble with the C compiler).
+fn target_wants_nasm() -> bool {
+    matches!(
+        env::var("CARGO_CFG_TARGET_ARCH").as_deref(),
+        Ok("x86_64") | Ok("x86")
+    )
+}
+
+fn unix_nasm_version() -> Option<String> {
+    Command::new("nasm")
+        .arg("-v")
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+/// Build the vendored FFmpeg with the system C toolchain (or reuse its
+/// cache) and emit its link lines.
+///
+/// Same shape as the Windows pipeline: out-of-tree `configure` + `make`,
+/// the license check against `config.h`, Toss's one C file compiled against
+/// the configured headers, then everything parked in `.native-cache`.
+fn build_ffmpeg_unix(manifest: &Path, out: &Path) {
+    // Assembly stays on for the same reason as on Windows: software video
+    // decode is about twice as fast with it. A build without NASM has to
+    // say so on purpose; it is never a silent downgrade.
+    let no_asm = env::var_os("TOSS_FFMPEG_NO_ASM").is_some();
+    let nasm = unix_nasm_version();
+    if target_wants_nasm() && nasm.is_none() && !no_asm {
+        panic!(
+            "\n\nNASM was not found, and the FFmpeg build keeps assembly on.\n\
+             Install it (Debian/Ubuntu: apt install nasm; Fedora/RHEL: dnf install nasm;\n\
+             Arch: pacman -S nasm), or set TOSS_FFMPEG_NO_ASM=1 to build a slower\n\
+             decoder deliberately.\n"
+        );
+    }
+
+    let mut state = Fnv::new();
+    state.feed(b"ffmpeg-unix");
+    for name in [
+        "CARGO_CFG_TARGET_OS",
+        "CARGO_CFG_TARGET_ARCH",
+        "CARGO_CFG_TARGET_ENV",
+    ] {
+        state.feed(name.as_bytes());
+        state.feed(env::var(name).unwrap_or_default().as_bytes());
+    }
+    for option in FFMPEG_UNIX_OPTIONS {
+        state.feed(option.as_bytes());
+    }
+    if let Ok(source) = fs::read(manifest.join("build.rs")) {
+        state.feed(&source);
+    }
+    let shim = unix_media_shim(manifest);
+    if let Ok(source) = fs::read(&shim) {
+        state.feed(&source);
+    }
+    state.feed(tree_hash(&manifest.join("third_party").join("ffmpeg")).as_bytes());
+    state.feed(c_toolchain_fingerprint().as_bytes());
+    state.feed(if no_asm { "asm:off" } else { "asm:on" }.as_bytes());
+    state.feed(nasm.as_deref().unwrap_or("nasm:none").as_bytes());
+    let cache = manifest
+        .join(NATIVE_CACHE)
+        .join(format!("{:016x}-ffmpeg", state.finish()));
+
+    let files: Vec<String> = FFMPEG_UNIX_LIBRARIES
+        .iter()
+        .map(|name| format!("lib{name}.a"))
+        .collect();
+    let names: Vec<&str> = files.iter().map(String::as_str).collect();
+    if !ffmpeg_cache_usable(&cache, &names) {
+        let build = out.join("ffmpeg-build");
+        fs::create_dir_all(&build)
+            .unwrap_or_else(|err| panic!("could not create {}: {err}", build.display()));
+        let source = manifest.join("third_party").join("ffmpeg");
+        let jobs = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
+
+        // The vendored tree is the release tarball as committed from
+        // Windows, so none of its scripts carry an executable bit — and the
+        // tree is never edited (UPSTREAM.md), mode bits included. Every
+        // script is therefore run through `sh` by name: configure here,
+        // `version.sh` through the makefile variable that names it.
+        let mut configure = Command::new("sh");
+        configure
+            .current_dir(&build)
+            .arg(source.join("configure"))
+            .args(FFMPEG_UNIX_OPTIONS);
+        if no_asm {
+            configure.arg("--disable-x86asm");
+        }
+        run(&mut configure, "FFmpeg configure");
+
+        // Only the five archives are asked for: the default target would
+        // also generate pkg-config files through another script nobody
+        // here reads.
+        let mut make = Command::new("make");
+        make.current_dir(&build)
+            .arg(format!("-j{jobs}"))
+            .arg(format!(
+                "VERSION_SH=sh {}",
+                source.join("ffbuild").join("version.sh").display()
+            ))
+            .args([
+                "libavformat/libavformat.a",
+                "libavcodec/libavcodec.a",
+                "libswscale/libswscale.a",
+                "libswresample/libswresample.a",
+                "libavutil/libavutil.a",
+            ]);
+        run(&mut make, "FFmpeg make");
+
+        assert_ffmpeg_license(&build.join("config.h"));
+
+        let object = build.join("toss_media_shim.o");
+        let archive = build.join("libtoss_media_shim.a");
+        let mut compile = Command::new("cc");
+        compile
+            .args(["-O2", "-fPIC", "-Wall", "-Wextra", "-Werror", "-c"])
+            .arg(&shim)
+            .arg("-o")
+            .arg(&object)
+            .arg(format!("-I{}", source.display()))
+            .arg(format!("-I{}", build.display()));
+        run(&mut compile, "media shim compile");
+        let _ = fs::remove_file(&archive);
+        let mut ar = Command::new("ar");
+        ar.arg("rcs").arg(&archive).arg(&object);
+        run(&mut ar, "media shim archive");
+
+        let _ = fs::remove_dir_all(&cache);
+        fs::create_dir_all(&cache)
+            .unwrap_or_else(|err| panic!("could not create {}: {err}", cache.display()));
+        let built = [
+            archive,
+            build.join("libavformat").join("libavformat.a"),
+            build.join("libavcodec").join("libavcodec.a"),
+            build.join("libswscale").join("libswscale.a"),
+            build.join("libswresample").join("libswresample.a"),
+            build.join("libavutil").join("libavutil.a"),
+        ];
+        let mut listing = String::new();
+        for library in &built {
+            let name = library
+                .file_name()
+                .expect("a library file has a name")
+                .to_string_lossy()
+                .into_owned();
+            fs::copy(library, cache.join(&name))
+                .unwrap_or_else(|err| panic!("could not cache {}: {err}", library.display()));
+            listing.push_str(&name);
+            listing.push('\n');
+        }
+        // Manifest last: a partial cache never restores.
+        fs::write(cache.join("manifest.txt"), listing)
+            .unwrap_or_else(|err| panic!("could not write cache manifest: {err}"));
+    }
+
+    println!("cargo:rustc-link-search=native={}", cache.display());
+    for library in FFMPEG_UNIX_LIBRARIES {
+        println!("cargo:rustc-link-lib=static={library}");
+    }
+    // FFmpeg's own EXTRALIBS for this configuration: the math library and
+    // threads. Both are glibc's, already on the portability whitelist.
+    for system in ["m", "pthread"] {
+        println!("cargo:rustc-link-lib={system}");
+    }
 }

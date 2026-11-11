@@ -203,8 +203,9 @@ without overclaiming:
 | Version | 9.0.2 (verbatim release tarball, `third_party/ffmpeg/`) |
 | Upstream | FFmpeg project — licenses preserved upstream, tree never edited |
 | License of the built closure | **LGPL-2.1-or-later** — GPL components off, nonfree off (§2) |
-| Configure line | lives in `build.rs` (`FFMPEG_OPTIONS`); capability = hevc decoder + matroska/mov demuxers + file protocol + swscale, from `--disable-everything` up |
-| Build mode | MSVC static (`--toolchain=msvc`), ASM on (NASM required), driven by `build.rs` into `.native-cache`, only on Windows with the `media` feature |
+| Configure line (Windows) | lives in `build.rs` (`FFMPEG_OPTIONS`); capability = hevc decoder + matroska/mov demuxers + file protocol + swscale, from `--disable-everything` up |
+| Configure line (Linux and other Unix) | lives in `build.rs` (`FFMPEG_UNIX_OPTIONS`); there is no system media framework to lean on, so FFmpeg is the whole player: h264/hevc/vp8/vp9/mpeg4 video, aac/mp3/flac/opus/vorbis/ac3/dca/pcm audio, mov/matroska/avi/mp3/flac/wav demuxers, file protocol, swscale + swresample, from `--disable-everything --disable-autodetect` up. No AV1. Patent-encumbered decoders (H.264, HEVC, AAC, AC-3, DTS) are included by decision; patent licensing is separate from copyright licensing and is the distributor's to assess |
+| Build mode | Windows: MSVC static (`--toolchain=msvc`). Unix: `configure` + `make`, static `.a` with `-fPIC`, plus Toss's own `media_shim.c`. Both ASM on (NASM required), driven by `build.rs` into `.native-cache`, only with the `media` feature; the same `config.h` license assertion runs on both |
 | Distribution | LGPL source obligations apply at release time; re-checked in the pre-release audit (§1) |
 
 ---

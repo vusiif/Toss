@@ -16,6 +16,7 @@ use std::path::Path;
 use crate::core::error::TossError;
 use crate::core::log;
 use crate::platform::image::ViewRequest;
+use crate::platform::portable::display;
 use crate::platform::raster::{self, Decoded, Source};
 
 use self::view::View;
@@ -65,10 +66,10 @@ pub fn view_pdf(document: crate::backend::pdf::Document) -> Result<(), TossError
 /// A window if any display answers; otherwise the terminal, if there is
 /// one; otherwise a sentence saying neither exists (exit 3).
 fn surface() -> Result<Surface, TossError> {
-    match window::available() {
+    match display::available() {
         Ok(()) => Ok(Surface::Window),
         Err(_) if terminal::available() => Ok(Surface::Terminal),
-        Err(window::NoDisplay(reason)) => Err(TossError::not_implemented(format!(
+        Err(display::NoDisplay(reason)) => Err(TossError::not_implemented(format!(
             "image viewing here: no display ({reason}) and no terminal to draw in"
         ))),
     }

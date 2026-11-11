@@ -48,4 +48,44 @@ open_and_check "$repo/tests/corpus/image/panel.png" panel.png 320x200
 # 7×5 opens at the 320×200 minimum client size.
 open_and_check "$repo/tests/corpus/image/odd.png" odd.png 320x200
 
+play_and_check() { # play_and_check <file> <expected WxH>
+  local file=$1 size=$2 title
+  title=$(basename "$file")
+  local start=$SECONDS
+  "$toss" play "$file" >"$work/out" 2>"$work/err" </dev/null &
+  viewer=$!
+  local tree=""
+  for _ in $(seq 50); do
+    tree=$(xwininfo -root -tree 2>/dev/null | grep -F "\"$title\"" || true)
+    [[ -n $tree ]] && break
+    kill -0 "$viewer" 2>/dev/null || break
+    sleep 0.1
+  done
+  if [[ -z $tree ]]; then
+    echo "FAIL $title: no window appeared"; sed 's/^/     | /' "$work/err"; fail=1
+  elif [[ $tree != *" ${size}+"* ]]; then
+    echo "FAIL $title: window is not $size: $tree"; fail=1
+  else
+    echo "ok   $title opened at $size"
+  fi
+  # A one-second film closes its own window when it ends.
+  local code=""
+  for _ in $(seq 100); do
+    kill -0 "$viewer" 2>/dev/null || { wait "$viewer"; code=$?; break; }
+    sleep 0.1
+  done
+  if [[ -z $code ]]; then
+    echo "FAIL $title: still playing after 10 s"; kill "$viewer" 2>/dev/null; fail=1
+  elif [[ $code != 0 ]]; then
+    echo "FAIL $title: exit $code"; sed 's/^/     | /' "$work/err"; fail=1
+  else
+    echo "ok   $title played to its end in $((SECONDS - start)) s"
+  fi
+  grep -q 'Media Player' "$work/out" || { echo "FAIL $title: no console summary"; fail=1; }
+}
+
+# 160×120 films open at the minimum, keeping their 4:3 shape.
+play_and_check "$repo/tests/corpus/media/tone.mp4" 320x240
+play_and_check "$repo/tests/corpus/media/hevc.mkv" 320x240
+
 exit $fail

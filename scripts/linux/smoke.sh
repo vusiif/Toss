@@ -76,9 +76,16 @@ expect "  ...says why"                   grep -q 'no display' "$work/err"
 printf 'not a pdf' >bad.pdf
 check "broken PDF is corrupt"          6 "${headless[@]}" "$toss" view bad.pdf
 
-# Not on Linux yet: becomes a real check when its phase lands.
+# Media files are opened by the bundled FFmpeg before a display or a sound
+# device is looked for, so the same rule holds. A minimal container has
+# neither (and usually no libasound either): playback is refused in words.
+check "broken film is corrupt"         6 "${headless[@]}" "$toss" play "$corpus/media/truncated.mp4"
+check "not media at all"               3 "${headless[@]}" "$toss" play "$repo/Cargo.toml"
+check "sound with nowhere to play"     3 "${headless[@]}" "$toss" "$corpus/media/tone.flac"
+expect "  ...says why"                   grep -qi 'sound' "$work/err"
+check "film with no screen or speaker" 3 "${headless[@]}" "$toss" "$corpus/media/hevc.mkv"
+expect "  ...says why"                   grep -q 'no display' "$work/err"
 # (`hash` is unimplemented on every platform, so it is not asserted here.)
-check "media playback (pending)"       3 "$toss" play "$corpus/media/tone.wav"
 
 echo "== $pass passed, $fail failed"
 (( fail == 0 ))

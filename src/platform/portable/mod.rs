@@ -9,8 +9,15 @@
 //! depend on a platform-exclusive implementation (§13.3).
 //!
 //! Phase 8 fills this module. On Linux (and any target that is not Windows)
-//! it is the image/PDF viewer: bundled codecs and one winit/softbuffer
-//! window, with the terminal as the fallback when there is no display.
+//! it is the image/PDF viewer and the media player: bundled codecs and one
+//! winit/softbuffer window, with the terminal as the fallback when there is
+//! no display.
+
+#[cfg(all(not(windows), any(feature = "image", feature = "media")))]
+pub(crate) mod display;
 
 #[cfg(all(not(windows), feature = "image"))]
 pub mod image;
+
+#[cfg(all(not(windows), feature = "media"))]
+pub mod media;

@@ -38,7 +38,18 @@ image = [
 # reasoning as `image` (MEDIA_PLAYBACK.md §5): a build without it never
 # hears of `windows` for this purpose, and everywhere else the capability
 # answers exit 3 with the refusal Toss gives for what it was not built with.
-media = ["dep:windows", "windows/Win32_System_Console"]
+# Media playback. On Windows that is Media Foundation (plus the bundled HEVC
+# decoder); everywhere else it is the portable player — bundled FFmpeg, the
+# same winit/softbuffer window as the image viewer, and ALSA loaded at run
+# time through `libc`.
+media = [
+    "dep:windows",
+    "windows/Win32_System_Console",
+    "dep:winit",
+    "dep:softbuffer",
+    "dep:ratatui",
+    "dep:libc",
+]
 inspect = []
 hash = []
 spreadsheet = ["dep:toss-sheet"]

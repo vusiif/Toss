@@ -8,11 +8,14 @@
 #
 # gcc-toolset gives a current C/C++ compiler for the vendored native
 # libraries while still targeting the system glibc 2.28.
+# NASM assembles FFmpeg's x86 decode routines (about twice the speed); on
+# EL8 it lives in the PowerTools repository.
 FROM almalinux:8
 
 RUN dnf -y install dnf-plugins-core \
+ && dnf config-manager --set-enabled powertools \
  && dnf -y install gcc-toolset-13-gcc gcc-toolset-13-gcc-c++ cmake make \
-        git perl diffutils file binutils \
+        git perl diffutils file binutils nasm \
  && dnf clean all
 
 ENV PATH=/opt/rh/gcc-toolset-13/root/usr/bin:/root/.cargo/bin:$PATH \

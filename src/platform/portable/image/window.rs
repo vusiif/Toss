@@ -3,92 +3,33 @@
 //! Wayland, xkbcommon) at run time, so a machine without one is told so in
 //! a sentence instead of failing to start the whole binary.
 
-use std::cell::RefCell;
 use std::num::NonZeroU32;
 use std::rc::Rc;
 
 use winit::application::ApplicationHandler;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, EventLoop};
+use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::{Key as Logical, NamedKey};
 use winit::platform::run_on_demand::EventLoopExtRunOnDemand;
 use winit::window::{CursorIcon, Window, WindowId};
 
 use crate::core::error::TossError;
+use crate::platform::portable::display::{self, NoDisplay};
 
 use super::view::{Effect, Key, View};
 
-thread_local! {
-    /// winit allows one event loop per process; every window Toss opens
-    /// (a Word document can open several pictures in turn) reuses it.
-    static EVENT_LOOP: RefCell<Option<EventLoop<()>>> = const { RefCell::new(None) };
-}
-
-/// Why there is no window: the display could not be reached at all.
-#[derive(Debug)]
-pub(super) struct NoDisplay(pub(super) String);
-
-/// Make sure an event loop exists, or say why one cannot.
-pub(super) fn available() -> Result<(), NoDisplay> {
-    EVENT_LOOP.with(|cell| {
-        let mut slot = cell.borrow_mut();
-        if slot.is_none() {
-            *slot = Some(new_event_loop().map_err(|err| NoDisplay(reason(&err.to_string())))?);
-        }
-        Ok(())
-    })
-}
-
-/// winit prefixes OS errors with the source line that raised them
-/// (`os error at /…/mod.rs:788: `). That is its build machine's path, not
-/// something to show a user: keep only the sentence after it.
-fn reason(text: &str) -> String {
-    match text
-        .split_once(".rs:")
-        .and_then(|(_, rest)| rest.split_once(": "))
-    {
-        Some((line, sentence)) if !line.is_empty() && line.bytes().all(|b| b.is_ascii_digit()) => {
-            sentence.to_string()
-        }
-        _ => text.to_string(),
-    }
-}
-
-fn new_event_loop() -> Result<EventLoop<()>, winit::error::EventLoopError> {
-    let mut builder = EventLoop::builder();
-    #[cfg(any(
-        target_os = "linux",
-        target_os = "freebsd",
-        target_os = "openbsd",
-        target_os = "netbsd",
-        target_os = "dragonfly"
-    ))]
-    {
-        use winit::platform::wayland::EventLoopBuilderExtWayland;
-        use winit::platform::x11::EventLoopBuilderExtX11;
-        EventLoopBuilderExtX11::with_any_thread(&mut builder, true);
-        EventLoopBuilderExtWayland::with_any_thread(&mut builder, true);
-    }
-    builder.build()
-}
-
 /// Show `view` in a window and return when it closes.
 pub(super) fn run(view: View) -> Result<(), TossError> {
-    available().map_err(|NoDisplay(reason)| TossError::other(format!("no display: {reason}")))?;
     let mut app = App {
         view,
         window: None,
         error: None,
         cursor: (0, 0),
     };
-    EVENT_LOOP.with(|cell| {
-        let mut slot = cell.borrow_mut();
-        let event_loop = slot.as_mut().expect("event loop was just created");
-        event_loop
-            .run_app_on_demand(&mut app)
-            .map_err(|err| TossError::other(format!("image viewer stopped: {err}")))
-    })?;
+    display::with_event_loop(|event_loop| event_loop.run_app_on_demand(&mut app))
+        .map_err(|NoDisplay(reason)| TossError::other(format!("no display: {reason}")))?
+        .map_err(|err| TossError::other(format!("image viewer stopped: {err}")))?;
     match app.error {
         Some(err) => Err(err),
         None => Ok(()),
@@ -278,25 +219,5 @@ impl ApplicationHandler for App {
             }
             _ => {}
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::reason;
-
-    #[test]
-    fn a_display_failure_is_reported_without_the_build_path() {
-        assert_eq!(
-            reason(
-                "os error at /root/.cargo/registry/winit/src/linux/mod.rs:788: Failed to load one of xlib's shared libraries"
-            ),
-            "Failed to load one of xlib's shared libraries"
-        );
-        assert_eq!(
-            reason("neither WAYLAND_DISPLAY nor DISPLAY is set."),
-            "neither WAYLAND_DISPLAY nor DISPLAY is set."
-        );
-        assert_eq!(reason("see lib.rs: later"), "see lib.rs: later");
     }
 }

@@ -6,7 +6,7 @@
 //! - the failure paths, which answer on **every** platform and need no
 //!   audio device — these run in ordinary `cargo test`, on CI included;
 //! - the lifecycle itself — open a corpus file, play it to its end, tear
-//!   down — which needs Windows, the `media` feature, *and* a machine with
+//!   down — which needs the `media` feature *and* a machine with
 //!   somewhere for sound to go, so it is marked `#[ignore]` and run on a
 //!   real machine with `cargo test -- --ignored`. CI runners have no audio
 //!   endpoint; a red build there would say more about the runner than about
@@ -63,18 +63,15 @@ fn a_directory_given_to_play_is_refused_as_not_a_media_file() {
 
 #[test]
 fn a_broken_container_reports_a_corrupt_input_rather_than_a_failure() {
-    // The classification P7-A measured against real Media Foundation:
-    // a container cut inside its header is §24's 6 where a player exists,
-    // and §24's 3 where the capability itself does not — the same shape as
-    // the image verdict in `tests/image.rs`.
+    // A container cut inside its header is §24's 6 where a player exists
+    // (Media Foundation on Windows, the bundled FFmpeg elsewhere), and §24's
+    // 3 where the capability itself does not — the same shape as the image
+    // verdict in `tests/image.rs`. The file is judged before any display or
+    // sound device is looked for, so this holds on a headless runner too.
     let broken = corpus().join("truncated.mp4");
     let output = toss(&[&broken.to_string_lossy()]);
 
-    let expected = if cfg!(all(windows, feature = "media")) {
-        6
-    } else {
-        3
-    };
+    let expected = if cfg!(feature = "media") { 6 } else { 3 };
     assert_eq!(
         output.status.code(),
         Some(expected),
@@ -106,12 +103,12 @@ fn a_file_that_is_not_media_at_all_is_refused_by_the_play_verb() {
 /// Run with `cargo test -- --ignored` on a real machine; P7-A measured it
 /// there at ~1.1 s for a 1.0 s file.
 #[test]
-#[ignore = "needs Windows, the media feature, and an audio endpoint"]
+#[ignore = "needs the media feature and an audio endpoint"]
 fn plays_a_tone_all_the_way_to_its_end() {
-    #[cfg(not(all(windows, feature = "media")))]
+    #[cfg(not(feature = "media"))]
     return;
 
-    #[cfg(all(windows, feature = "media"))]
+    #[cfg(feature = "media")]
     {
         let tone = corpus().join("tone.wav");
         let output = toss(&[&tone.to_string_lossy()]);
@@ -119,7 +116,7 @@ fn plays_a_tone_all_the_way_to_its_end() {
         assert_eq!(
             output.status.code(),
             Some(0),
-            "the lifecycle is supposed to run to MEEndOfPresentation: {}",
+            "the lifecycle is supposed to run to the end of the file: {}",
             reported(&output)
         );
     }
@@ -127,20 +124,21 @@ fn plays_a_tone_all_the_way_to_its_end() {
 
 /// The capability chain, end to end, on an HEVC file.
 ///
-/// On the floor machine Windows ships no HEVC Media Foundation transform, so
-/// Media Foundation refuses this file twice (all streams, then video-only)
+/// On the Windows floor machine there is no HEVC Media Foundation transform,
+/// so Media Foundation refuses this file twice (all streams, then video-only)
 /// and the bundled software decoder is the chain's third link; on a machine
 /// that *does* have an HEVC MFT, Media Foundation plays it and the software
-/// path is never reached. Either way the file plays to its end and the
-/// process exits 0, which is the whole contract. Ignored because it opens a
-/// window and needs a desktop; run with `cargo test -- --ignored`.
+/// path is never reached. Elsewhere the bundled FFmpeg is the whole chain.
+/// Either way the file plays to its end and the process exits 0, which is
+/// the whole contract. Ignored because it opens a window and needs a
+/// desktop; run with `cargo test -- --ignored`.
 #[test]
-#[ignore = "needs Windows, the media feature, and a desktop"]
+#[ignore = "needs the media feature and a desktop"]
 fn an_hevc_file_plays_through_the_capability_chain() {
-    #[cfg(not(all(windows, feature = "media")))]
+    #[cfg(not(feature = "media"))]
     return;
 
-    #[cfg(all(windows, feature = "media"))]
+    #[cfg(feature = "media")]
     {
         let fixture = corpus().join("hevc.mkv");
         let output = toss(&[&fixture.to_string_lossy()]);
